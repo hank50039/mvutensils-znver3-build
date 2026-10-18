@@ -4,7 +4,8 @@ ROOT = Path("MPCVideoRenderer")
 CPP = ROOT / "Source/VideoRenderer.cpp"
 raw_source = CPP.read_bytes()
 has_utf8_bom = raw_source.startswith(b"\xef\xbb\xbf")
-source = raw_source.decode("utf-8-sig")
+source_newline = "\r\n" if b"\r\n" in raw_source else "\n"
+source = raw_source.decode("utf-8-sig").replace("\r\n", "\n")
 
 helper = r'''
 #include <chrono>
@@ -203,7 +204,7 @@ if source.count(render_old) != 1:
     raise SystemExit("Could not uniquely locate final Render()/return block.")
 source = source.replace(render_old, render_new, 1)
 
-encoded_source = source.encode("utf-8")
+encoded_source = source.replace("\n", source_newline).encode("utf-8")
 if has_utf8_bom:
     encoded_source = b"\xef\xbb\xbf" + encoded_source
 CPP.write_bytes(encoded_source)
