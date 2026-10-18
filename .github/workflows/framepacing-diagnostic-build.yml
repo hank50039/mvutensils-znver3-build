@@ -1,0 +1,28 @@
+name: Build VapourSynth Filter frame-pacing diagnostics
+
+on:
+  push:
+    branches:
+      - experiment/vs-frame-pacing-diagnostics
+
+permissions:
+  contents: read
+
+jobs:
+  build-vsfilter-diagnostics:
+    runs-on: windows-2025-vs2026
+    steps:
+      - name: Checkout diagnostic scripts
+        uses: actions/checkout@v6
+
+      - name: Build diagnostic filter
+        shell: pwsh
+        run: pwsh -File scripts/build_vapoursynth_diagnostic.ps1
+
+      - name: Upload diagnostic filter
+        uses: actions/upload-artifact@v7
+        with:
+          name: vapoursynth-filter-frame-pacing-diagnostics
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
