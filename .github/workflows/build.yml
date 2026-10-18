@@ -79,13 +79,18 @@ jobs:
 
           expected = "'1': ['-march=x86-64-v3', '-mtune=znver3'],"
           with tarfile.open(sdists[0], "r:gz") as archive:
-              files = [m for m in archive.getmembers() if m.name.endswith("/meson.build") or m.name == "meson.build"]
-              if len(files) != 1:
-                  raise SystemExit(f"Expected one meson.build in sdist; found {len(files)}")
-              source = archive.extractfile(files[0]).read().decode("utf-8")
+              matches = []
+              for member in archive.getmembers():
+                  if member.isfile() and member.name.endswith("meson.build"):
+                      source = archive.extractfile(member).read().decode("utf-8")
+                      if "march_levels = {" in source:
+                          matches.append((member.name, source))
+              if len(matches) != 1:
+                  raise SystemExit(f"Expected one primary Meson build file containing march_levels; found {len(matches)}")
+              name, source = matches[0]
               if expected not in source:
-                  raise SystemExit("Verification failed: Zen 3 tuning flag is missing from the packaged source distribution.")
-          print("Verified: the source distribution contains the requested -mtune=znver3 AVX2 setting.")
+                  raise SystemExit(f"Verification failed: Zen 3 tuning flag is missing from packaged {name}.")
+          print(f"Verified: {name} contains the requested -mtune=znver3 AVX2 setting.")
 
           with zipfile.ZipFile(wheels[0]) as archive:
               dlls = [n for n in archive.namelist() if n.endswith("/mvutensils.avx2.dll")]
