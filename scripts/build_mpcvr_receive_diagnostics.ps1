@@ -19,6 +19,10 @@ Write-Host "Applying slow-Receive diagnostic instrumentation..."
 python scripts/patch_mpcvr_receive_diagnostics.py
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+Write-Host "Applying clock/scheduler timing diagnostics..."
+python scripts/patch_mpcvr_schedule_diagnostics.py
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
 Write-Host "Applying nested D3D11 render-stage instrumentation..."
 python scripts/patch_mpcvr_dx11_render_diagnostics.py
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -61,8 +65,10 @@ MPC Video Renderer nested rendering diagnostics build (x64)
 Upstream repository: https://github.com/clsid2/MPCVideoRenderer
 Pinned upstream commit: $sourceCommit
 Instrumentation A: MRDIAG entries for Receive calls taking at least 20 ms.
+Instrumentation B: SCHEDDIAG entries for large scheduler waits and early/late decisions.
+Log C: %LOCALAPPDATA%\MPCVideoRendererScheduleDiag.log
 Log A: %LOCALAPPDATA%\MPCVideoRendererDiag.log
-Instrumentation B: DX11DIAG entries for ProcessSample/Render stages taking at least 20 ms.
+Instrumentation C: DX11DIAG entries for ProcessSample/Render stages taking at least 20 ms.
 Log B: %LOCALAPPDATA%\MPCVideoRendererDX11Diag.log
 DX11DIAG separates sample copying, internal Render, Process pipeline, vertical-blank wait, frame-time sync, and Present. Slow MemCopyToTexSrcVideo calls additionally report D3D11 Map wait time, per-plane CPU copy time, and Unmap time.
 This is an experimental diagnostic build, not an official release.
@@ -77,11 +83,12 @@ Test instructions:
 5. Close PotPlayer and attach all three logs:
    - %LOCALAPPDATA%\MPCVideoRendererDiag.log
    - %LOCALAPPDATA%\MPCVideoRendererDX11Diag.log
+   - %LOCALAPPDATA%\MPCVideoRendererScheduleDiag.log
    - the new VapourSynthFilter.log
    The DX11 log may also contain stage MemCopyToTexSrcVideo with map_total_us, copy_plane_total_us, and per-plane timings.
 6. Restore the original renderer file after testing.
 
-The build is based on upstream commit $sourceCommit. It only writes diagnostic records for slow calls/stages (20 ms threshold) to limit logging overhead. This is not an official release; restore the original .ax after testing.
+The build is based on upstream commit $sourceCommit. It only writes diagnostic records for slow calls/stages (20 ms threshold) and large scheduling deviations (200 ms threshold) to limit logging overhead. This is not an official release; restore the original .ax after testing.
 "@ | Set-Content -Encoding utf8 dist/INSTALL-TEST.txt
 
 Compress-Archive -Path dist/MpcVideoRenderer64.ax,dist/BUILD-INFO.txt,dist/INSTALL-TEST.txt -DestinationPath dist/MPCVideoRenderer-Deep-Render-Diagnostics-Test.zip -Force
