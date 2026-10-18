@@ -48,15 +48,16 @@ void LogMpcvrScheduleDiagnostic(const wchar_t* record)
 '''
 
 replace_once(
-'''#include "stdafx.h"
-#include "renbase2.h"
-''',
-'''#include "stdafx.h"
-#include "renbase2.h"
-''' + helper,
-    "insert schedule diagnostic helper"
+'''    ASSERT(m_pClock);''',
+'''    const REFERENCE_TIME diagInputStart = *ptrStart;
+    const REFERENCE_TIME diagInputStop = *ptrEnd;
+    const int diagEarlinessBefore = m_trEarliness;
+    const int diagWaitAverageBefore = m_trWaitAvg;
+    const int diagRenderAverageBefore = m_trRenderAvg;
+    const int diagFrameAverageBefore = m_trFrameAvg;
+    ASSERT(m_pClock);''',
+    "capture incoming timestamp and scheduler state"
 )
-
 replace_once(
 '''{
     const REFERENCE_TIME diagInputStart = *ptrStart;
