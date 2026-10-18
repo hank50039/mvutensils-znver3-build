@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - experiment/vs-frame-pacing-diagnostics
-  workflow_dispatch:
 
 permissions:
   contents: read
