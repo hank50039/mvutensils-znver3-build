@@ -1,0 +1,86 @@
+name: Build Zen 3 AVX2 tuning
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout build instructions
+        uses: actions/checkout@v6
+
+      - name: Set up MSYS2 CLANG64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            git
+            mingw-w64-clang-x86_64-fftw
+            mingw-w64-clang-x86_64-git
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-python
+            mingw-w64-clang-x86_64-python-pip
+            mingw-w64-clang-x86_64-python-wheel
+            mingw-w64-clang-x86_64-toolchain
+            mingw-w64-clang-x86_64-uv
+            mingw-w64-clang-x86_64-zimg
+
+      - name: Clone upstream source
+        run: |
+          git clone https://github.com/myrsloik/mvutensils.git upstream
+          cd upstream
+          echo "UPSTREAM_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git log -1 --oneline
+
+      - name: Apply Zen 3 tuning to AVX2 build variant only
+        run: |
+          cd upstream
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("meson.build")
+          s = p.read_text(encoding="utf-8")
+          old = "'1': ['-march=x86-64-v3'],"
+          new = "'1': ['-march=x86-64-v3', '-mtune=znver3'],"
+          if s.count(old) != 1:
+              raise SystemExit("Could not uniquely locate the upstream AVX2 march setting; refusing to patch.")
+          p.write_text(s.replace(old, new), encoding="utf-8")
+          print("Patched AVX2 variant: -march=x86-64-v3 -mtune=znver3")
+          PY
+
+      - name: Build wheel
+        run: |
+          cd upstream
+          uv build -Csetup-args="-Dprefer_static=true" -Csetup-args="-Dcpp_link_args=-static"
+          mkdir -p ../dist
+          cp dist/*.whl ../dist/
+          cp dist/*.tar.gz ../dist/
+          echo "Built from upstream commit: $UPSTREAM_COMMIT" > ../dist/BUILD-INFO.txt
+          echo "Extra flag: -mtune=znver3 (AVX2 variant only)" >> ../dist/BUILD-INFO.txt
+
+      - name: Normalize wheel tag and strip DLL
+        run: |
+          cd dist
+          wheel tags --remove --python-tag py3 --abi-tag none *.whl
+          wheel unpack --dest unpacked *.whl
+          rm *.whl
+          strip $(find unpacked -name '*.dll')
+          wheel pack unpacked/*
+
+      - name: Upload Windows build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: mvutensils-znver3-windows
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
