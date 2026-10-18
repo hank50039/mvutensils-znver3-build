@@ -1,0 +1,28 @@
+name: Build MPC Video Renderer Receive timing diagnostics
+
+on:
+  push:
+    branches:
+      - experiment/mpcvr-receive-timing-diagnostics
+
+permissions:
+  contents: read
+
+jobs:
+  build-mpcvr-diagnostics:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout diagnostic build scripts
+        uses: actions/checkout@v6
+
+      - name: Build instrumented renderer
+        shell: pwsh
+        run: pwsh -File scripts/build_mpcvr_receive_diagnostics.ps1
+
+      - name: Upload diagnostic renderer
+        uses: actions/upload-artifact@v7
+        with:
+          name: mpcvr-receive-timing-diagnostics
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
