@@ -110,7 +110,7 @@ replace_once(
     const REFERENCE_TIME diagRunStartTime = m_tStart;
 
     trRealStream -= m_tStart;     // convert to stream time (this is a reftime)
-    const REFERENCE_TIME diagStreamClockNow = trRealStream
+    const REFERENCE_TIME diagStreamClockNow = trRealStream;
 ''',
 '''    REFERENCE_TIME trRealStream;     // the real time now expressed as stream time.
     m_pClock->GetTime(&trRealStream);
