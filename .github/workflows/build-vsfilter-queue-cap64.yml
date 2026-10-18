@@ -1,0 +1,117 @@
+name: Build experimental VapourSynth Filter queue-cap64
+
+on:
+  push:
+    branches:
+      - experiment/vapoursynth-queue-cap64
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-vsfilter:
+    runs-on: windows-2025-vs2026
+    steps:
+      - name: Checkout experiment workflow
+        uses: actions/checkout@v6
+
+      - name: Clone upstream VapourSynth Filter source
+        shell: pwsh
+        run: |
+          git clone --depth=1 https://github.com/CrendKing/avisynth_filter.git upstream
+          $sha = git -C upstream rev-parse HEAD
+          "UPSTREAM_FILTER_COMMIT=$sha" >> $env:GITHUB_ENV
+          Write-Host "Upstream commit: $sha"
+
+      - name: Patch bounded async output queue (experimental)
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+
+          path = Path("upstream/vapoursynth_filter/src/frame_handler.cpp")
+          source = path.read_text(encoding="utf-8")
+
+          needle = "namespace SynthFilter {\n\nauto FrameHandler::AddInputSample"
+          replacement = (
+              "namespace SynthFilter {\n\n"
+              "namespace {\n"
+              "constexpr int MAX_PENDING_OUTPUT_FRAMES = 64;\n"
+              "}\n\n"
+              "auto FrameHandler::AddInputSample"
+          )
+          if source.count(needle) != 1:
+              raise SystemExit("Could not uniquely locate FrameHandler::AddInputSample namespace anchor.")
+          source = source.replace(needle, replacement, 1)
+
+          old = '''    while (_nextOutputFrameNb <= maxRequestOutputFrameNb) {
+              // before every async request to a frame, we need to keep track of the request so that when flushing we can wait for
+              // any pending request to finish before destroying the script
+
+              {
+                  const std::unique_lock uniqueOutputLock(_outputMutex);
+
+                  _outputFrames.emplace(_nextOutputFrameNb, nullptr);
+              }
+              AVSF_VPS_API->getFrameAsync(_nextOutputFrameNb, MainFrameServer::GetInstance().GetScriptClip(), VpsGetFrameCallback, this);
+          '''
+          new = '''    while (_nextOutputFrameNb <= maxRequestOutputFrameNb) {
+              // Experimental back-pressure: cap outstanding/ready output frames. A seek flush waits for every
+              // tracked async callback, so an oversized stale queue can prolong every seek.
+              {
+                  const std::unique_lock uniqueOutputLock(_outputMutex);
+
+                  if (_outputFrames.size() >= MAX_PENDING_OUTPUT_FRAMES) {
+                      break;  // resume scheduling on the next input sample after output frames are consumed
+                  }
+
+                  _outputFrames.emplace(_nextOutputFrameNb, nullptr);
+              }
+              AVSF_VPS_API->getFrameAsync(_nextOutputFrameNb, MainFrameServer::GetInstance().GetScriptClip(), VpsGetFrameCallback, this);
+          '''
+          if source.count(old) != 1:
+              raise SystemExit("Could not uniquely locate the output-request scheduling loop.")
+          source = source.replace(old, new, 1)
+          path.write_text(source, encoding="utf-8")
+          print("Applied experimental MAX_PENDING_OUTPUT_FRAMES=64 patch.")
+          '@ | Set-Content -Encoding utf8 patch_filter.py
+          python patch_filter.py
+          git -C upstream diff --check
+          git -C upstream diff -- vapoursynth_filter/src/frame_handler.cpp
+
+      - name: Build Release x64 filter
+        shell: pwsh
+        run: |
+          pwsh -File upstream/build.ps1 -Configuration Release -Platform x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prepare experimental artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $filter = Get-ChildItem upstream/x64/Release -Filter "vapoursynth_filter*.ax" | Select-Object -First 1
+          if (-not $filter) {
+            Get-ChildItem upstream/x64/Release
+            throw "Could not find the built VapourSynth DirectShow filter .ax file."
+          }
+          Copy-Item $filter.FullName dist/
+          $pdb = Get-ChildItem upstream/x64/Release -Filter "vapoursynth_filter*.pdb" | Select-Object -First 1
+          if ($pdb) { Copy-Item $pdb.FullName dist/ }
+          @"
+          Experimental build: VapourSynth Filter x64
+          Upstream repository: https://github.com/CrendKing/avisynth_filter
+          Upstream commit: $env:UPSTREAM_FILTER_COMMIT
+          Patch: cap tracked output requests at 64 frames in vapoursynth_filter/src/frame_handler.cpp
+          Purpose: test whether bounding queued asynchronous output frames reduces seek/flush stalls.
+          This is an experimental test build, not an official release.
+          "@ | Set-Content -Encoding utf8 dist/BUILD-INFO.txt
+          Get-ChildItem dist | Format-Table Name,Length
+
+      - name: Upload experimental filter
+        uses: actions/upload-artifact@v7
+        with:
+          name: vapoursynth-filter-queue-cap64-experimental
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
