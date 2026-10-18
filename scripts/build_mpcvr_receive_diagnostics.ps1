@@ -23,6 +23,10 @@ Write-Host "Applying nested D3D11 render-stage instrumentation..."
 python scripts/patch_mpcvr_dx11_render_diagnostics.py
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+Write-Host "Applying D3D11 Map/copy/unmap substage instrumentation..."
+python scripts/patch_mpcvr_map_diagnostics.py
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
 # Upstream contains mixed line endings/trailing spaces; build validation below is the meaningful check.
 git -C MPCVideoRenderer diff --stat
 
@@ -60,7 +64,7 @@ Instrumentation A: MRDIAG entries for Receive calls taking at least 20 ms.
 Log A: %LOCALAPPDATA%\MPCVideoRendererDiag.log
 Instrumentation B: DX11DIAG entries for ProcessSample/Render stages taking at least 20 ms.
 Log B: %LOCALAPPDATA%\MPCVideoRendererDX11Diag.log
-DX11DIAG separates sample copying, internal Render, Process pipeline, vertical-blank wait, frame-time sync, and Present.
+DX11DIAG separates sample copying, internal Render, Process pipeline, vertical-blank wait, frame-time sync, and Present. Slow MemCopyToTexSrcVideo calls additionally report D3D11 Map wait time, per-plane CPU copy time, and Unmap time.
 This is an experimental diagnostic build, not an official release.
 "@ | Set-Content -Encoding utf8 dist/BUILD-INFO.txt
 
@@ -74,6 +78,7 @@ Test instructions:
    - %LOCALAPPDATA%\MPCVideoRendererDiag.log
    - %LOCALAPPDATA%\MPCVideoRendererDX11Diag.log
    - the new VapourSynthFilter.log
+   The DX11 log may also contain stage MemCopyToTexSrcVideo with map_total_us, copy_plane_total_us, and per-plane timings.
 6. Restore the original renderer file after testing.
 
 The build is based on upstream commit $sourceCommit. It only writes diagnostic records for slow calls/stages (20 ms threshold) to limit logging overhead. This is not an official release; restore the original .ax after testing.
