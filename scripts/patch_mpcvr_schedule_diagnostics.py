@@ -48,6 +48,13 @@ void LogMpcvrScheduleDiagnostic(const wchar_t* record)
 '''
 
 replace_once(
+'''#include "renbase2.h"''',
+'''#include "renbase2.h"
+''' + helper,
+    "insert schedule diagnostic logger"
+)
+
+replace_once(
 '''    ASSERT(m_pClock);''',
 '''    const REFERENCE_TIME diagInputStart = *ptrStart;
     const REFERENCE_TIME diagInputStop = *ptrEnd;
