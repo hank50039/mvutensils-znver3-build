@@ -28,6 +28,8 @@ replace_once(
     long long diagMapUVUs = 0, diagCopyUVUs = 0, diagUnmapUVUs = 0;
     long long diagMapVUs = 0, diagCopyVUs = 0, diagUnmapVUs = 0;
     long long diagMapSingleUs = 0, diagCopySingleUs = 0, diagUnmapSingleUs = 0;
+    long long diagMapSingleProbeUs = 0, diagMapSingleFallbackUs = 0;
+    HRESULT diagMapSingleProbeHr = E_PENDING;
 
 \tHRESULT hr = S_FALSE;
 \tD3D11_MAPPED_SUBRESOURCE mappedResource = {};
@@ -131,10 +133,21 @@ replace_once(
 \t\t\tm_pDeviceContext->Unmap(m_TexSrcVideo.pTexture, 0);
 ''',
 '''	} else {
-        const auto diagMapSingleStart = std::chrono::steady_clock::now();
-\t\thr = m_pDeviceContext->Map(m_TexSrcVideo.pTexture, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource);
-        diagMapSingleUs = std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - diagMapSingleStart).count();
+        const auto diagMapSingleProbeStart = std::chrono::steady_clock::now();
+        diagMapSingleProbeHr = m_pDeviceContext->Map(
+            m_TexSrcVideo.pTexture, 0, D3D11_MAP_WRITE_DISCARD,
+            D3D11_MAP_FLAG_DO_NOT_WAIT, &mappedResource);
+        diagMapSingleProbeUs = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - diagMapSingleProbeStart).count();
+        hr = diagMapSingleProbeHr;
+        if (FAILED(diagMapSingleProbeHr)) {
+            const auto diagMapSingleFallbackStart = std::chrono::steady_clock::now();
+            hr = m_pDeviceContext->Map(
+                m_TexSrcVideo.pTexture, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource);
+            diagMapSingleFallbackUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - diagMapSingleFallbackStart).count();
+        }
+        diagMapSingleUs = diagMapSingleProbeUs + diagMapSingleFallbackUs;
 \t\tif (SUCCEEDED(hr)) {
 \t\t\tconst BYTE* src = (srcPitch < 0) ? srcData + srcPitch * (1 - (int)m_srcLines) : srcData;
             const auto diagCopySingleStart = std::chrono::steady_clock::now();
@@ -160,12 +173,14 @@ HRESULT CDX11VideoProcessor::SetDevice''',
     const long long diagCopyTotalUs = diagCopyYUs + diagCopyUVUs + diagCopyVUs + diagCopySingleUs;
     const long long diagUnmapTotalUs = diagUnmapYUs + diagUnmapUVUs + diagUnmapVUs + diagUnmapSingleUs;
     if (diagTotalUs >= 20000) {
-        wchar_t record[1024]{};
+        wchar_t record[1400]{};
         swprintf_s(record, ARRAYSIZE(record),
-            L"stage MemCopyToTexSrcVideo sample_start_100ns %lld total_us %lld map_total_us %lld copy_plane_total_us %lld unmap_total_us %lld map_y_us %lld copy_y_us %lld unmap_y_us %lld map_uv_us %lld copy_uv_us %lld unmap_uv_us %lld map_v_us %lld copy_v_us %lld unmap_v_us %lld map_single_us %lld copy_single_us %lld unmap_single_us %lld separate_plane_textures %d src_pitch %d src_lines %d src_height %d hr 0x%08X",
+            L"stage MemCopyToTexSrcVideo sample_start_100ns %lld total_us %lld map_total_us %lld copy_plane_total_us %lld unmap_total_us %lld map_y_us %lld copy_y_us %lld unmap_y_us %lld map_uv_us %lld copy_uv_us %lld unmap_uv_us %lld map_v_us %lld copy_v_us %lld unmap_v_us %lld map_single_us %lld map_single_probe_us %lld map_single_probe_hr 0x%08X map_single_fallback_us %lld copy_single_us %lld unmap_single_us %lld separate_plane_textures %d src_pitch %d src_lines %d src_height %d hr 0x%08X",
             static_cast<long long>(m_rtStart), diagTotalUs, diagMapTotalUs, diagCopyTotalUs, diagUnmapTotalUs,
             diagMapYUs, diagCopyYUs, diagUnmapYUs, diagMapUVUs, diagCopyUVUs, diagUnmapUVUs,
-            diagMapVUs, diagCopyVUs, diagUnmapVUs, diagMapSingleUs, diagCopySingleUs, diagUnmapSingleUs,
+            diagMapVUs, diagCopyVUs, diagUnmapVUs, diagMapSingleUs,
+            diagMapSingleProbeUs, static_cast<unsigned int>(diagMapSingleProbeHr), diagMapSingleFallbackUs,
+            diagCopySingleUs, diagUnmapSingleUs,
             m_TexSrcVideo.pTexture2 ? 1 : 0, srcPitch, m_srcLines, m_srcHeight,
             static_cast<unsigned int>(hr));
         LogMpcvrDx11Diagnostic(record);
