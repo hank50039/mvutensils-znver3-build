@@ -27,10 +27,6 @@ Write-Host "Applying nested D3D11 render-stage instrumentation..."
 python scripts/patch_mpcvr_dx11_render_diagnostics.py
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-Write-Host "Applying D3D11 Map/copy/unmap substage instrumentation..."
-python scripts/patch_mpcvr_map_diagnostics.py
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
 # Upstream contains mixed line endings/trailing spaces; build validation below is the meaningful check.
 git -C MPCVideoRenderer diff --stat
 
