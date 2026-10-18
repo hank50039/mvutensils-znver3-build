@@ -59,51 +59,34 @@ replace_once(
     "capture incoming timestamp and scheduler state"
 )
 replace_once(
-'''{
-    const REFERENCE_TIME diagInputStart = *ptrStart;
-    const REFERENCE_TIME diagInputStop = *ptrEnd;
-    const int diagEarlinessBefore = m_trEarliness;
-    const int diagWaitAverageBefore = m_trWaitAvg;
-    const int diagRenderAverageBefore = m_trRenderAvg;
-    const int diagFrameAverageBefore = m_trFrameAvg;
-
-    // Don't call us unless there's a clock interface to synchronise with
-    ASSERT(m_pClock);
-''',
-'''{
-    const REFERENCE_TIME diagInputStart = *ptrStart;
-    const REFERENCE_TIME diagInputStop = *ptrEnd;
-    const int diagEarlinessBefore = m_trEarliness;
-    const int diagWaitAverageBefore = m_trWaitAvg;
-    const int diagRenderAverageBefore = m_trRenderAvg;
-    const int diagFrameAverageBefore = m_trFrameAvg;
- 
-    // Don't call us unless there's a clock interface to synchronise with
-    ASSERT(m_pClock);
-''',
-    "capture incoming timestamp and scheduler state"
-)
-
-replace_once(
+'''    if (*ptrStart>=80000) {
+        *ptrStart -= 80000;
+        *ptrEnd -= 80000;       // bias stop to to retain valid frame duration
+    }''',
 '''    if (*ptrStart>=80000) {
         *ptrStart -= 80000;
         *ptrEnd -= 80000;       // bias stop to to retain valid frame duration
     }
-    const REFERENCE_TIME diagStartAfterMonitorBias = *ptrStart;
-
-    // Cache the time stamp now.  We will want to compare what we did with what
-''',
-'''    if (*ptrStart>=80000) {
-        *ptrStart -= 80000;
-        *ptrEnd -= 80000;       // bias stop to to retain valid frame duration
-    }
-    const REFERENCE_TIME diagStartAfterMonitorBias = *ptrStart;
- 
-    // Cache the time stamp now.  We will want to compare what we did with what
-''',
+    const REFERENCE_TIME diagStartAfterMonitorBias = *ptrStart;''',
     "capture monitor-biased start timestamp"
 )
 
+replace_once(
+'''    REFERENCE_TIME trRealStream;     // the real time now expressed as stream time.
+    m_pClock->GetTime(&trRealStream);''',
+'''    REFERENCE_TIME trRealStream;     // the real time now expressed as stream time.
+    m_pClock->GetTime(&trRealStream);
+    const REFERENCE_TIME diagReferenceClockNow = trRealStream;
+    const REFERENCE_TIME diagRunStartTime = m_tStart;''',
+    "capture reference clock and run start time"
+)
+
+replace_once(
+'''    trRealStream -= m_tStart;     // convert to stream time (this is a reftime)''',
+'''    trRealStream -= m_tStart;     // convert to stream time (this is a reftime)
+    const REFERENCE_TIME diagStreamClockNow = trRealStream;''',
+    "capture stream clock time"
+)
 replace_once(
 '''    REFERENCE_TIME trRealStream;     // the real time now expressed as stream time.
     m_pClock->GetTime(&trRealStream);
