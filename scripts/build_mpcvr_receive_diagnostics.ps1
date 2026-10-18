@@ -27,6 +27,10 @@ Write-Host "Applying nested D3D11 render-stage instrumentation..."
 python scripts/patch_mpcvr_dx11_render_diagnostics.py
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+Write-Host "Applying D3D11 Map nonblocking probe instrumentation..."
+python scripts/patch_mpcvr_map_diagnostics.py
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
 # Upstream contains mixed line endings/trailing spaces; build validation below is the meaningful check.
 git -C MPCVideoRenderer diff --stat
 
@@ -66,7 +70,7 @@ Log C: %LOCALAPPDATA%\MPCVideoRendererScheduleDiag.log
 Log A: %LOCALAPPDATA%\MPCVideoRendererDiag.log
 Instrumentation C: DX11DIAG entries for ProcessSample/Render stages taking at least 20 ms.
 Log B: %LOCALAPPDATA%\MPCVideoRendererDX11Diag.log
-DX11DIAG separates sample copying, internal Render, Process pipeline, vertical-blank wait, frame-time sync, and Present. Slow MemCopyToTexSrcVideo calls additionally report D3D11 Map wait time, per-plane CPU copy time, and Unmap time.
+DX11DIAG separates sample copying, internal Render, Process pipeline, vertical-blank wait, frame-time sync, and Present. Slow MemCopyToTexSrcVideo calls report a nonblocking Map probe result and time, any blocking fallback time, per-plane CPU copy time, and Unmap time.
 This is an experimental diagnostic build, not an official release.
 "@ | Set-Content -Encoding utf8 dist/BUILD-INFO.txt
 
@@ -76,12 +80,12 @@ Test instructions:
 2. Back up the current registered x64 renderer file before replacing it.
 3. Replace only the existing MpcVideoRenderer64.ax with the supplied file, keeping the same installed path and filename.
 4. Keep the same VapourSynth script/settings; play the same section and reproduce one startup stutter plus one seek stutter.
-5. Close PotPlayer and attach all three logs:
+5. Close PotPlayer and attach all three renderer logs:
    - %LOCALAPPDATA%\MPCVideoRendererDiag.log
    - %LOCALAPPDATA%\MPCVideoRendererDX11Diag.log
    - %LOCALAPPDATA%\MPCVideoRendererScheduleDiag.log
    - the new VapourSynthFilter.log
-   The DX11 log may also contain stage MemCopyToTexSrcVideo with map_total_us, copy_plane_total_us, and per-plane timings.
+   The DX11 log may also contain stage MemCopyToTexSrcVideo with map_total_us, map_single_probe_hr, map_single_probe_us, map_single_fallback_us, copy_plane_total_us, and per-plane timings.
 6. Restore the original renderer file after testing.
 
 The build is based on upstream commit $sourceCommit. It only writes diagnostic records for slow calls/stages (20 ms threshold) and large scheduling deviations (200 ms threshold) to limit logging overhead. This is not an official release; restore the original .ax after testing.
