@@ -1,4 +1,4 @@
-name: Build Zen 3 AVX2 tuning
+name: Build verified Zen 3 AVX2 tuning
 
 on:
   push:
@@ -43,7 +43,7 @@ jobs:
           echo "UPSTREAM_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           git log -1 --oneline
 
-      - name: Apply Zen 3 tuning to AVX2 build variant only
+      - name: Apply and commit Zen 3 tuning to AVX2 build variant only
         run: |
           cd upstream
           python - <<'PY'
@@ -57,16 +57,53 @@ jobs:
           p.write_text(s.replace(old, new), encoding="utf-8")
           print("Patched AVX2 variant: -march=x86-64-v3 -mtune=znver3")
           PY
+          git add meson.build
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Apply Zen 3 tuning to AVX2 build variant"
+          echo "PATCHED_SOURCE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git show --stat --oneline HEAD
 
-      - name: Build wheel
+      - name: Build and verify wheel/source distribution
         run: |
           cd upstream
           uv build -Csetup-args="-Dprefer_static=true" -Csetup-args="-Dcpp_link_args=-static"
+          python - <<'PY'
+          from pathlib import Path
+          import tarfile
+          import zipfile
+
+          dist = Path("dist")
+          sdists = list(dist.glob("*.tar.gz"))
+          wheels = list(dist.glob("*.whl"))
+          if len(sdists) != 1 or len(wheels) != 1:
+              raise SystemExit(f"Expected one sdist and one wheel; found {len(sdists)} and {len(wheels)}")
+
+          expected = "'1': ['-march=x86-64-v3', '-mtune=znver3'],"
+          with tarfile.open(sdists[0], "r:gz") as archive:
+              files = [m for m in archive.getmembers() if m.name.endswith("/meson.build") or m.name == "meson.build"]
+              if len(files) != 1:
+                  raise SystemExit(f"Expected one meson.build in sdist; found {len(files)}")
+              source = archive.extractfile(files[0]).read().decode("utf-8")
+              if expected not in source:
+                  raise SystemExit("Verification failed: Zen 3 tuning flag is missing from the packaged source distribution.")
+          print("Verified: the source distribution contains the requested -mtune=znver3 AVX2 setting.")
+
+          with zipfile.ZipFile(wheels[0]) as archive:
+              dlls = [n for n in archive.namelist() if n.endswith("/mvutensils.avx2.dll")]
+              if len(dlls) != 1:
+                  raise SystemExit(f"Expected one AVX2 DLL in wheel; found {len(dlls)}")
+              dll = archive.read(dlls[0])
+              if not dll.startswith(b"MZ"):
+                  raise SystemExit("Verification failed: the AVX2 payload is not a Windows PE file.")
+          print(f"Verified: wheel contains Windows AVX2 DLL ({len(dll):,} bytes).")
+          PY
           mkdir -p ../dist
           cp dist/*.whl ../dist/
           cp dist/*.tar.gz ../dist/
           echo "Built from upstream commit: $UPSTREAM_COMMIT" > ../dist/BUILD-INFO.txt
-          echo "Extra flag: -mtune=znver3 (AVX2 variant only)" >> ../dist/BUILD-INFO.txt
+          echo "Patched source commit: $PATCHED_SOURCE_COMMIT" >> ../dist/BUILD-INFO.txt
+          echo "Compiler: Clang (MSYS2 CLANG64)" >> ../dist/BUILD-INFO.txt
+          echo "Extra flag: -mtune=znver3; AVX2 ISA floor retained as -march=x86-64-v3" >> ../dist/BUILD-INFO.txt
+          echo "Source-distribution verification: passed" >> ../dist/BUILD-INFO.txt
 
       - name: Normalize wheel tag and strip DLL
         run: |
@@ -77,10 +114,10 @@ jobs:
           strip $(find unpacked -name '*.dll')
           wheel pack unpacked/*
 
-      - name: Upload Windows build artifact
+      - name: Upload verified Windows build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: mvutensils-znver3-windows
+          name: mvutensils-znver3-windows-verified
           path: dist/*
           if-no-files-found: error
           retention-days: 14
