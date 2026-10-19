@@ -51,7 +51,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Diagnostic patcher failed" }
           git -C upstream diff --check
           if ($LASTEXITCODE -ne 0) { throw "Patched source failed git diff --check" }
-          $patched = Select-String -Path upstream/Source/VideoRenderer.cpp -Pattern "WAITPROBE_STATE|WAITPROBE qpc_before"
+          $patched = Select-String -Path upstream/Source/VideoRenderer.cpp -Pattern "WAITPROBE_ENTER|WAITPROBE_EXIT"
           if (-not $patched) { throw "Wait probe markers not found in patched source" }
           git -C upstream diff -- Source/VideoRenderer.cpp | Out-File -FilePath MPCVideoRendererWaitProbe.patch -Encoding utf8
           if ((Get-Item MPCVideoRendererWaitProbe.patch).Length -lt 1000) { throw "Patch diff unexpectedly small" }
@@ -73,6 +73,7 @@ jobs:
           }
           $waitProbe = Select-String -Path upstream/Source/VideoRenderer.cpp -Pattern "MPCVideoRendererWaitProbeDiag.txt|WAITPROBE qpc_before"
           if ($waitProbe.Count -lt 2) { throw "Wait probe logging markers missing from source" }
+          if (-not (Select-String -Path upstream/Source/VideoRenderer.h -Pattern "WaitForRenderTime\(\) override")) { throw "WaitForRenderTime override declaration missing" }
 
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item $dll dist/MpcVideoRenderer64.ax
