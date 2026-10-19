@@ -30,8 +30,10 @@ jobs:
       - name: Apply Cap-28 and format/Receive diagnostics
         shell: pwsh
         run: |
-          python .github/scripts/patch_vsfilter_diag.py avisynth_filter
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python .github/scripts/patch_vsfilter_diag.py avisynth_filter *> apply-patch.log
+          $patchExitCode = $LASTEXITCODE
+          Get-Content apply-patch.log | Write-Output
+          if ($patchExitCode -ne 0) { throw "Diagnostic patch failed with exit code $patchExitCode." }
 
       - name: Build Release x64
         shell: pwsh
@@ -79,3 +81,14 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upload patch/build diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: potplayer-vapoursynth-build-debug-log
+          path: |
+            apply-patch.log
+            avisynth_filter/x64/Release/*.log
+          if-no-files-found: warn
+          retention-days: 14
