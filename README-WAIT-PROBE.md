@@ -5,8 +5,8 @@ This workflow builds a diagnostic-only x64 MPC Video Renderer from a pinned upst
 - Upstream repository: https://github.com/clsid2/MPCVideoRenderer
 - Upstream commit: `e55dd16fda83de20a4b4856538d8efc870ab1cb4`
 - Build: Windows x64 Release, Visual Studio MSBuild
-- Probe: a virtual override times the original `WaitForRenderTime()` call, with entry/exit records for a bounded number of waits. It records sample timestamps and lightweight renderer state/event snapshots. It does not call the reference clock or write logs from Run/Pause/Stop/BeginFlush/EndFlush/other lifecycle methods.
-- The original `Receive()` body and playback lifecycle methods are left unchanged by this patch.
+- Probe: a virtual override times the original `WaitForRenderTime()` call, with entry/exit records for a bounded number of waits. It records sample timestamps and renderer state snapshots. It does not poll event handles, call the reference clock, or write logs from Run/Pause/Stop/BeginFlush/EndFlush/other lifecycle methods.
+- The original `Receive()` body is unchanged. `NewSegment()` and `EndFlush()` only reset an atomic sampling counter; they do not perform diagnostic I/O or wait on event handles.
 
 ## Output
 
@@ -18,7 +18,7 @@ The probe writes entry/exit records for up to 12 waits after each new segment or
 
 This is an experimental diagnostic build, not an official release. Keep a backup of the currently registered x64 renderer, close PotPlayer before replacement, replace only `MpcVideoRenderer64.ax`, and restore the backup after collecting logs. Do not replace the VapourSynth filter for this test; keep the existing BT.709 Fast Path, Cap-28, 4K source, 90 FPS and current buffers unchanged.
 
-The preceding experimental revision added synchronous state logging inside Run/Pause/Stop/Flush transitions. That variant caused a reported full static picture and should **not** be used. This bounded revision removes those lifecycle probes.
+Two preceding diagnostic variants were reported to cause a completely static picture. The bounded revision initially removed lifecycle logging but still incorrectly called `WaitForSingleObject(m_RenderEvent, 0)` to inspect event state. Because `m_RenderEvent` is auto-reset, this can consume the render wake-up and prevent frames from rendering. This corrected source removes all event-handle polling. It has passed only source/build checks, not testing on the user's machine; do not treat it as confirmed safe until a controlled test succeeds.
 
 ## Source and license
 
