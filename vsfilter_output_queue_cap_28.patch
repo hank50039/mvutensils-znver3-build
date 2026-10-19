@@ -1,0 +1,92 @@
+diff --git a/vapoursynth_filter/src/frame_handler.h b/vapoursynth_filter/src/frame_handler.h
+--- a/vapoursynth_filter/src/frame_handler.h
++++ b/vapoursynth_filter/src/frame_handler.h
+@@ -1,9 +1,11 @@
+ // License: https://github.com/CrendKing/avisynth_filter/blob/master/LICENSE.txt
+ 
+ #pragma once
+ 
++#include <cstddef>
++
+ #include "frameserver.h"
+ #include "hdr.h"
+ 
+ 
+ namespace SynthFilter {
+@@ -51,6 +53,9 @@ private:
+     auto RefreshDeliveryFrameRates(int frameNb) -> void;
+ 
+     static constexpr const int NUM_SRC_FRAMES_PER_PROCESSING = 2;
++    // Experimental cap: limit queued plus in-flight output frames during startup/seek.
++    // Change to 8 or 32 for comparison builds.
++    static constexpr std::size_t MAX_QUEUED_OUTPUT_FRAMES = 28;
+ 
+     CSynthFilter &_filter;
+ 
+@@ -77,6 +82,7 @@ private:
+     std::thread _workerThread;
+ 
+     std::atomic<bool> _isFlushing = false;
++    std::atomic<bool> _outputRequestThrottleLogged = false;
+     std::atomic<bool> _isStopping = false;
+     std::atomic<bool> _isWorkerLatched = false;
+ 
+diff --git a/vapoursynth_filter/src/frame_handler.cpp b/vapoursynth_filter/src/frame_handler.cpp
+--- a/vapoursynth_filter/src/frame_handler.cpp
++++ b/vapoursynth_filter/src/frame_handler.cpp
+@@ -170,14 +170,30 @@ auto FrameHandler::AddInputSample(IMediaSample *inputSample) -> HRESULT {
+                                                                   MainFrameServer::GetInstance().GetScriptAvgFrameDuration(),
+                                                                   0));
+     while (_nextOutputFrameNb <= maxRequestOutputFrameNb) {
+-        // before every async request to a frame, we need to keep track of the request so that when flushing we can wait for
+-        // any pending request to finish before destroying the script
+-
++        // Do not fan out an unbounded number of async output requests at startup or after a seek.
++        // The map tracks both outstanding requests and frames waiting to be delivered downstream.
++        bool outputQueueLimitReached = false;
+         {
+             const std::unique_lock uniqueOutputLock(_outputMutex);
+ 
+-            _outputFrames.emplace(_nextOutputFrameNb, nullptr);
++            outputQueueLimitReached = _outputFrames.size() >= MAX_QUEUED_OUTPUT_FRAMES;
++            if (!outputQueueLimitReached) {
++                // before every async request to a frame, we need to keep track of the request so that when flushing we can wait for
++                // any pending request to finish before destroying the script
++                _outputFrames.emplace(_nextOutputFrameNb, nullptr);
++            }
++        }
++
++        if (outputQueueLimitReached) {
++            if (!_outputRequestThrottleLogged.exchange(true, std::memory_order_relaxed)) {
++                Environment::GetInstance().Log(
++                    L"Throttle output requests at frame %6d: queued output-frame limit %2zd reached",
++                    _nextOutputFrameNb,
++                    MAX_QUEUED_OUTPUT_FRAMES);
++            }
++            break;
+         }
++
+         AVSF_VPS_API->getFrameAsync(_nextOutputFrameNb, MainFrameServer::GetInstance().GetScriptClip(), VpsGetFrameCallback, this);
+ 
+         _nextOutputFrameNb += 1;
+@@ -261,7 +277,11 @@ auto VS_CC FrameHandler::VpsGetFrameCallback(void *userData, const VSFrame *f, i
+     }
+ 
+     FrameHandler *frameHandler = static_cast<FrameHandler *>(userData);
+-    Environment::GetInstance().Log(L"Output frame %6d is ready, output queue size %2zd", n, frameHandler->_outputFrames.size());
++    const auto outputQueueSize = [&frameHandler]() {
++        const std::shared_lock sharedOutputLock(frameHandler->_outputMutex);
++        return frameHandler->_outputFrames.size();
++    }();
++    Environment::GetInstance().Log(L"Output frame %6d is ready, output queue size %2zd", n, outputQueueSize);
+ 
+     if (frameHandler->_isFlushing) {
+         {
+@@ -299,6 +319,7 @@ auto FrameHandler::ResetInput() -> void {
+     _nextProcessSourceFrameNb = 0;
+     _nextOutputFrameNb = 0;
+     _lastUsedSourceFrameNb = 0;
++    _outputRequestThrottleLogged = false;
+     _notifyChangedOutputMediaType = false;
+ 
+     _frameRateCheckpointInputSampleNb = 0;
