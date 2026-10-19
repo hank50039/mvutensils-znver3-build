@@ -1,4 +1,4 @@
-name: Build MPC Video Renderer wait probe
+name: Build MPC Video Renderer stage probe
 
 on:
   push:
@@ -51,12 +51,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Diagnostic patcher failed" }
           git -C upstream diff --check
           if ($LASTEXITCODE -ne 0) { throw "Patched source failed git diff --check" }
-          $patched = Select-String -Path upstream/Source/VideoRenderer.cpp -Pattern "WAITPROBE_ENTER|WAITPROBE_EXIT"
-          if (-not $patched) { throw "Wait probe markers not found in patched source" }
-          $destructiveEventProbe = Select-String -Path upstream/Source/VideoRenderer.cpp -Pattern "WaitForSingleObject\s*\(\s*m_RenderEvent"
+          $rendererMarkers = Select-String -Path upstream/Source/VideoRenderer.cpp -Pattern "WAITPROBE_ENTER|WAITPROBE_EXIT|RECEIVEPROBE|PROCESSPROBE"
+          if (-not $rendererMarkers) { throw "Renderer stage timing markers not found in patched source" }
+          $dx11Markers = Select-String -Path upstream/Source/DX11VideoProcessor.cpp -Pattern "DX11STAGE|MAPPROBE|PRESENTPROBE"
+          if (-not $dx11Markers) { throw "DX11 stage timing markers not found in patched source" }
+          $destructiveEventProbe = Select-String -Path upstream/Source/VideoRenderer.cpp,upstream/Source/DX11VideoProcessor.cpp -Pattern "WaitForSingleObject\s*\(\s*m_RenderEvent"
           if ($destructiveEventProbe) { throw "Unsafe diagnostic: polling auto-reset m_RenderEvent can consume the render wake-up" }
-          git -C upstream diff -- Source/VideoRenderer.cpp | Out-File -FilePath MPCVideoRendererWaitProbe.patch -Encoding utf8
-          if ((Get-Item MPCVideoRendererWaitProbe.patch).Length -lt 1000) { throw "Patch diff unexpectedly small" }
+          git -C upstream diff -- Source/VideoRenderer.cpp Source/DX11VideoProcessor.cpp | Out-File -FilePath MPCVideoRendererStageProbe.patch -Encoding utf8
+          if ((Get-Item MPCVideoRendererStageProbe.patch).Length -lt 1500) { throw "Stage probe patch diff unexpectedly small" }
 
       - name: Build x64 Release
         shell: pwsh
@@ -73,24 +75,27 @@ jobs:
           if ($bytes.Length -lt 100000 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
             throw "Output does not appear to be a valid Windows PE DLL"
           }
-          $waitProbe = Select-String -Path upstream/Source/VideoRenderer.cpp -Pattern "WAITPROBE_ENTER|WAITPROBE_EXIT"
-          if ($waitProbe.Count -lt 2) { throw "Wait probe logging markers missing from source" }
+          $waitProbe = Select-String -Path upstream/Source/VideoRenderer.cpp -Pattern "WAITPROBE_ENTER|WAITPROBE_EXIT|RECEIVEPROBE|PROCESSPROBE"
+          if ($waitProbe.Count -lt 4) { throw "Renderer timing markers missing from source" }
+          $dx11Probe = Select-String -Path upstream/Source/DX11VideoProcessor.cpp -Pattern "DX11STAGE|MAPPROBE|PRESENTPROBE"
+          if ($dx11Probe.Count -lt 3) { throw "DX11 timing markers missing from source" }
           if (-not (Select-String -Path upstream/Source/VideoRenderer.h -Pattern "WaitForRenderTime\(\) override")) { throw "WaitForRenderTime override declaration missing" }
+          if (-not (Select-String -Path upstream/Source/VideoRenderer.h -Pattern "MPCVRProbeShouldLogStage")) { throw "Shared stage-probe declarations missing" }
 
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item $dll dist/MpcVideoRenderer64.ax
-          Copy-Item MPCVideoRendererWaitProbe.patch dist/
+          Copy-Item MPCVideoRendererStageProbe.patch dist/
           Copy-Item tools/apply_mpcvr_wait_probe.py dist/
           Copy-Item README-WAIT-PROBE.md dist/README.txt
 
           @(
-            "Build: MPC Video Renderer Wait Probe, experimental x64 Release"
+            "Build: MPC Video Renderer Stage Probe, experimental x64 Release"
             "Upstream repository: https://github.com/clsid2/MPCVideoRenderer"
             "Upstream commit: $env:UPSTREAM_COMMIT"
             "Architecture: x64"
             "Configuration: Release"
             "Compiler: Visual Studio 2022 MSBuild"
-            "Patch: MPCVideoRendererWaitProbe.patch"
+            "Patch: MPCVideoRendererStageProbe.patch"
             "New log: %LOCALAPPDATA%\MPCVideoRendererWaitProbeDiag.txt"
             "This is a diagnostic-only experimental build, not an official release."
           ) | Set-Content -Encoding utf8 dist/BUILD-INFO.txt
@@ -98,13 +103,13 @@ jobs:
           $hash = (Get-FileHash dist/MpcVideoRenderer64.ax -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  MpcVideoRenderer64.ax" | Set-Content -Encoding ascii dist/SHA256.txt
 
-          Compress-Archive -Path dist/* -DestinationPath MPCVideoRenderer-WaitProbe-x64.zip -Force
+          Compress-Archive -Path dist/* -DestinationPath MPCVideoRenderer-StageProbe-x64.zip -Force
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v7
         with:
-          name: MPCVideoRenderer-WaitProbe-x64
-          path: MPCVideoRenderer-WaitProbe-x64.zip
+          name: MPCVideoRenderer-StageProbe-x64
+          path: MPCVideoRenderer-StageProbe-x64.zip
           if-no-files-found: error
           retention-days: 14
 
@@ -117,12 +122,12 @@ jobs:
           $notes = @"
           Experimental diagnostic-only x64 Release build of MPC Video Renderer.
           Upstream commit: $env:UPSTREAM_COMMIT
-          Adds bounded WaitForRenderTime entry/exit records, sample timestamps, and renderer state snapshots. First 12 waits after each new segment/flush boundary are traced; later waits are logged only if they exceed 20 ms or fail.
+          Adds bounded WaitForRenderTime entry/exit records plus slow/failing timing records for the full Receive call, ProcessSample, DX11 CopySample/Render stages, individual staging-texture Map calls, and DXGI Present. Normal stage records use a 20 ms threshold; stalls of 100 ms or more have a separate bounded budget. The first 12 WaitForRenderTime calls after each segment/flush boundary are traced.
           It deliberately never polls m_RenderEvent: WaitForSingleObject on this auto-reset event can consume the render wake-up and freeze presentation.
-          This build does not log synchronously from Run/Pause/Stop/Flush lifecycle methods and does not read the reference clock for diagnostics.
+          The rendering decisions are unchanged. The diagnostic does not log from Run/Pause/Stop/Flush lifecycle methods or read the reference clock; slow/failing stage calls append records synchronously to the diagnostic text file.
           New log: %LOCALAPPDATA%\MPCVideoRendererWaitProbeDiag.txt
           Not an official upstream release. Back up the existing renderer and restore it after testing.
           "@
           Set-Content -Path release-notes.md -Value $notes -Encoding utf8
-          gh release create $tag MPCVideoRenderer-WaitProbe-x64.zip --repo "${{ github.repository }}" --title "MPC Video Renderer Wait Probe x64 (experimental)" --notes-file release-notes.md --prerelease
+          gh release create $tag MPCVideoRenderer-StageProbe-x64.zip --repo "${{ github.repository }}" --title "MPC Video Renderer Stage Probe x64 (experimental)" --notes-file release-notes.md --prerelease
           if ($LASTEXITCODE -ne 0) { throw "gh release creation failed" }

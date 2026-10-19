@@ -3,11 +3,13 @@ from pathlib import Path
 ROOT = Path("upstream")
 CPP = ROOT / "Source" / "VideoRenderer.cpp"
 HEADER = ROOT / "Source" / "VideoRenderer.h"
-if not CPP.is_file() or not HEADER.is_file():
+DX11_CPP = ROOT / "Source" / "DX11VideoProcessor.cpp"
+if not CPP.is_file() or not HEADER.is_file() or not DX11_CPP.is_file():
     raise SystemExit("Expected MPC Video Renderer source files are missing.")
 
 source = CPP.read_text(encoding="utf-8")
 header = HEADER.read_text(encoding="utf-8")
+dx11_source = DX11_CPP.read_text(encoding="utf-8")
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
     count = text.count(old)
@@ -23,6 +25,13 @@ header = replace_once(
     "declare targeted wait probe override",
 )
 
+header = replace_once(
+    header,
+    '#include "SubPic/ISubPic.h"',
+    '#include "SubPic/ISubPic.h"\n\nvoid MPCVRProbeLog(const wchar_t* format, ...);\nLONGLONG MPCVRProbeElapsedUs(LONGLONG begin, LONGLONG end);\nbool MPCVRProbeShouldLogStage(LONGLONG elapsedUs, HRESULT hr);',
+    "declare stage probe helpers",
+)
+
 source = replace_once(
     source,
     "#include <atomic>\n#include <optional>",
@@ -33,6 +42,8 @@ source = replace_once(
 helper = r"""
 static std::mutex g_waitProbeLogMutex;
 static std::atomic_int g_waitProbeBudget{12};
+static std::atomic_int g_stageProbeBudget{128};
+static std::atomic_int g_hardStageProbeBudget{64};
 
 static LONGLONG WaitProbeQpcFrequency()
 {
@@ -43,22 +54,16 @@ static LONGLONG WaitProbeQpcFrequency()
     return frequency;
 }
 
-static LONGLONG WaitProbeMicroseconds(LONGLONG begin, LONGLONG end)
+LONGLONG MPCVRProbeElapsedUs(LONGLONG begin, LONGLONG end)
 {
     return ((end - begin) * 1000000LL) / WaitProbeQpcFrequency();
 }
 
-static void WaitProbeResetBudget()
+static bool WaitProbeConsume(std::atomic_int& budget)
 {
-    // Only reset an atomic counter at segment/flush boundaries; no I/O or clock calls here.
-    g_waitProbeBudget.store(12, std::memory_order_relaxed);
-}
-
-static bool WaitProbeConsumeBudget()
-{
-    int remaining = g_waitProbeBudget.load(std::memory_order_relaxed);
+    int remaining = budget.load(std::memory_order_relaxed);
     while (remaining > 0) {
-        if (g_waitProbeBudget.compare_exchange_weak(
+        if (budget.compare_exchange_weak(
                 remaining, remaining - 1, std::memory_order_relaxed)) {
             return true;
         }
@@ -66,7 +71,31 @@ static bool WaitProbeConsumeBudget()
     return false;
 }
 
-static void WaitProbeLog(const wchar_t* format, ...)
+bool MPCVRProbeShouldLogStage(LONGLONG elapsedUs, HRESULT hr)
+{
+    if (elapsedUs >= 100000) {
+        return WaitProbeConsume(g_hardStageProbeBudget);
+    }
+    if (elapsedUs < 20000 && SUCCEEDED(hr)) {
+        return false;
+    }
+    return WaitProbeConsume(g_stageProbeBudget);
+}
+
+static void WaitProbeResetBudget()
+{
+    // Reset counters only; never perform diagnostic I/O from lifecycle methods.
+    g_waitProbeBudget.store(12, std::memory_order_relaxed);
+    g_stageProbeBudget.store(128, std::memory_order_relaxed);
+    g_hardStageProbeBudget.store(64, std::memory_order_relaxed);
+}
+
+static bool WaitProbeConsumeBudget()
+{
+    return WaitProbeConsume(g_waitProbeBudget);
+}
+
+void MPCVRProbeLog(const wchar_t* format, ...)
 {
     std::lock_guard<std::mutex> guard(g_waitProbeLogMutex);
 
@@ -112,6 +141,7 @@ static void WaitProbeLog(const wchar_t* format, ...)
         CloseHandle(file);
     }
 }
+
 """
 
 source = replace_once(
@@ -173,7 +203,7 @@ HRESULT CMpcVideoRenderer::WaitForRenderTime()
     LARGE_INTEGER entryQpc{};
     QueryPerformanceCounter(&entryQpc);
     if (logEntry) {
-        WaitProbeLog(L"WAITPROBE_ENTER qpc=%lld sample_time_hr=0x%08X sample_start_100ns=%lld sample_stop_100ns=%lld state=%d filter_state=%d streaming=%d renderer_flushing=%d abort=%d advise=%llu run_start_100ns=%lld rt_start_100ns=%lld",
+        MPCVRProbeLog(L"WAITPROBE_ENTER qpc=%lld sample_time_hr=0x%08X sample_start_100ns=%lld sample_stop_100ns=%lld state=%d filter_state=%d streaming=%d renderer_flushing=%d abort=%d advise=%llu run_start_100ns=%lld rt_start_100ns=%lld",
             static_cast<long long>(entryQpc.QuadPart),
             static_cast<unsigned int>(sampleTimeHr),
             static_cast<long long>(sampleStart),
@@ -196,7 +226,7 @@ HRESULT CMpcVideoRenderer::WaitForRenderTime()
     // The base wait below performs the original scheduling/wait behavior.
     HRESULT hr = CBaseVideoRenderer2::WaitForRenderTime();
     QueryPerformanceCounter(&waitEnd);
-    const LONGLONG waitUs = WaitProbeMicroseconds(waitBegin.QuadPart, waitEnd.QuadPart);
+    const LONGLONG waitUs = MPCVRProbeElapsedUs(waitBegin.QuadPart, waitEnd.QuadPart);
 
     if (logEntry || waitUs >= 20000 || FAILED(hr)) {
         REFERENCE_TIME afterStart = 0;
@@ -205,7 +235,7 @@ HRESULT CMpcVideoRenderer::WaitForRenderTime()
         if (m_pMediaSample) {
             afterSampleTimeHr = m_pMediaSample->GetTime(&afterStart, &afterStop);
         }
-        WaitProbeLog(L"WAITPROBE_EXIT qpc_begin=%lld qpc_end=%lld wait_us=%lld wait_hr=0x%08X sample_time_hr=0x%08X sample_start_100ns=%lld sample_stop_100ns=%lld state=%d filter_state=%d streaming=%d renderer_flushing=%d abort=%d advise=%llu run_start_100ns=%lld rt_start_100ns=%lld",
+        MPCVRProbeLog(L"WAITPROBE_EXIT qpc_begin=%lld qpc_end=%lld wait_us=%lld wait_hr=0x%08X sample_time_hr=0x%08X sample_start_100ns=%lld sample_stop_100ns=%lld state=%d filter_state=%d streaming=%d renderer_flushing=%d abort=%d advise=%llu run_start_100ns=%lld rt_start_100ns=%lld",
             static_cast<long long>(waitBegin.QuadPart),
             static_cast<long long>(waitEnd.QuadPart),
             static_cast<long long>(waitUs),
@@ -234,9 +264,274 @@ source = replace_once(
     "add WaitForRenderTime override",
 )
 
+
+
+# Instrument the complete synchronous Receive call, but only log slow/failing exits.
+receive_start_marker = "HRESULT CMpcVideoRenderer::Receive(IMediaSample* pSample)\n{"
+receive_start = source.find(receive_start_marker)
+receive_end = source.find("\nvoid CMpcVideoRenderer::UpdateDisplayInfo()", receive_start)
+if receive_start < 0 or receive_end < 0:
+    raise SystemExit("Could not locate CMpcVideoRenderer::Receive for timing.")
+receive_block = source[receive_start:receive_end]
+receive_setup = r"""
+    LARGE_INTEGER receiveProbeBegin{};
+    QueryPerformanceCounter(&receiveProbeBegin);
+    const int receiveStateBefore = static_cast<int>(m_State);
+    const int receiveFilterStateBefore = static_cast<int>(m_filterState);
+    const int receiveStreamingBefore = static_cast<int>(m_bStreaming);
+    const int receiveFlushingBefore = static_cast<int>(m_bFlushing);
+    auto logReceiveProbe = [&](const wchar_t* phase, HRESULT result) {
+        LARGE_INTEGER receiveProbeEnd{};
+        QueryPerformanceCounter(&receiveProbeEnd);
+        const LONGLONG receiveUs = MPCVRProbeElapsedUs(receiveProbeBegin.QuadPart, receiveProbeEnd.QuadPart);
+        if (!MPCVRProbeShouldLogStage(receiveUs, result)) {
+            return;
+        }
+        REFERENCE_TIME sampleStart = 0;
+        REFERENCE_TIME sampleStop = 0;
+        const HRESULT sampleTimeHr = pSample ? pSample->GetTime(&sampleStart, &sampleStop) : E_POINTER;
+        MPCVRProbeLog(L"RECEIVEPROBE qpc_begin=%lld qpc_end=%lld receive_us=%lld phase=%ls result_hr=0x%08X sample_time_hr=0x%08X sample_start_100ns=%lld sample_stop_100ns=%lld state_before=%d state_after=%d filter_state_before=%d filter_state_after=%d streaming_before=%d streaming_after=%d flushing_before=%d flushing_after=%d",
+            static_cast<long long>(receiveProbeBegin.QuadPart),
+            static_cast<long long>(receiveProbeEnd.QuadPart),
+            static_cast<long long>(receiveUs),
+            phase,
+            static_cast<unsigned int>(result),
+            static_cast<unsigned int>(sampleTimeHr),
+            static_cast<long long>(sampleStart),
+            static_cast<long long>(sampleStop),
+            receiveStateBefore,
+            static_cast<int>(m_State),
+            receiveFilterStateBefore,
+            static_cast<int>(m_filterState),
+            receiveStreamingBefore,
+            static_cast<int>(m_bStreaming),
+            receiveFlushingBefore,
+            static_cast<int>(m_bFlushing));
+    };
+"""
+receive_block = receive_block.replace(
+    receive_start_marker,
+    receive_start_marker + "\n" + receive_setup.rstrip("\n"),
+    1)
+receive_block = replace_once(
+    receive_block,
+    '\tif (m_bFlushing) {\n\t\tDLog(L"CMpcVideoRenderer::Receive() - flushing, skip sample");\n\t\treturn S_OK;\n\t}',
+    '\tif (m_bFlushing) {\n\t\tDLog(L"CMpcVideoRenderer::Receive() - flushing, skip sample");\n\t\tlogReceiveProbe(L"flushing_skip", S_OK);\n\t\treturn S_OK;\n}',
+    "probe flushing Receive exit")
+receive_block = replace_once(
+    receive_block,
+    '\tif (FAILED(hr)) {\n\t\tif (hr == VFW_E_SAMPLE_REJECTED) {\n\t\t\treturn NOERROR;\n\t\t}\n\t\treturn hr;\n\t}',
+    '\tif (FAILED(hr)) {\n\t\tif (hr == VFW_E_SAMPLE_REJECTED) {\n\t\t\tlogReceiveProbe(L"sample_rejected", hr);\n\t\t\treturn NOERROR;\n\t\t}\n\t\tlogReceiveProbe(L"prepare_receive_failed", hr);\n\t\treturn hr;\n\t}',
+    "probe PrepareReceive exits")
+receive_block = replace_once(
+    receive_block,
+    '\t\t\tif (m_State == State_Stopped)\n\t\t\t\treturn NOERROR;',
+    '\t\t\tif (m_State == State_Stopped) {\n\t\t\t\tlogReceiveProbe(L"stopped_after_pause_lock", NOERROR);\n\t\t\t\treturn NOERROR;\n\t\t\t}',
+    "probe stopped during pause")
+receive_block = replace_once(
+    receive_block,
+    '\tif (FAILED(hr)) {\n\t\tm_bInReceive = FALSE;\n\t\treturn NOERROR;\n\t}',
+    '\tif (FAILED(hr)) {\n\t\tm_bInReceive = FALSE;\n\t\tlogReceiveProbe(L"wait_for_render_time_failed", hr);\n\t\treturn NOERROR;\n\t}',
+    "probe wait failure exit")
+receive_block = replace_once(
+    receive_block,
+    '\tif (m_State == State_Stopped)\n\t\treturn NOERROR;',
+    '\tif (m_State == State_Stopped) {\n\t\tlogReceiveProbe(L"stopped_after_wait", NOERROR);\n\t\treturn NOERROR;\n\t}',
+    "probe stopped after wait")
+receive_block = replace_once(
+    receive_block,
+    '\treturn NOERROR;\n}',
+    '\tlogReceiveProbe(L"normal_exit", NOERROR);\n\treturn NOERROR;\n}',
+    "probe normal Receive exit")
+source = source[:receive_start] + receive_block + source[receive_end:]
+
+# Time the whole video-processor call in DoRenderSample separately from WaitForRenderTime.
+source = replace_once(
+    source,
+    '\tHRESULT hr = m_VideoProcessor->ProcessSample(pSample);',
+    r"""	LARGE_INTEGER processProbeBegin{};
+	QueryPerformanceCounter(&processProbeBegin);
+	HRESULT hr = m_VideoProcessor->ProcessSample(pSample);
+	LARGE_INTEGER processProbeEnd{};
+	QueryPerformanceCounter(&processProbeEnd);
+	const LONGLONG processProbeUs = MPCVRProbeElapsedUs(processProbeBegin.QuadPart, processProbeEnd.QuadPart);
+	if (MPCVRProbeShouldLogStage(processProbeUs, hr)) {
+		REFERENCE_TIME sampleStart = 0;
+		REFERENCE_TIME sampleStop = 0;
+		const HRESULT sampleTimeHr = pSample->GetTime(&sampleStart, &sampleStop);
+		MPCVRProbeLog(L"PROCESSPROBE qpc_begin=%lld qpc_end=%lld process_us=%lld result_hr=0x%08X sample_time_hr=0x%08X sample_start_100ns=%lld sample_stop_100ns=%lld",
+			static_cast<long long>(processProbeBegin.QuadPart),
+			static_cast<long long>(processProbeEnd.QuadPart),
+			static_cast<long long>(processProbeUs),
+			static_cast<unsigned int>(hr),
+			static_cast<unsigned int>(sampleTimeHr),
+			static_cast<long long>(sampleStart),
+			static_cast<long long>(sampleStop));
+	}""",
+    "probe total ProcessSample duration")
+
+# Add total/copy/render timings to the DX11 processor without changing its rendering decisions.
+dx11_process_start_marker = "HRESULT CDX11VideoProcessor::ProcessSample(IMediaSample* pSample)\n{"
+dx11_process_start = dx11_source.find(dx11_process_start_marker)
+dx11_process_end = dx11_source.find("\nHRESULT CDX11VideoProcessor::CopySample(IMediaSample* pSample)", dx11_process_start)
+if dx11_process_start < 0 or dx11_process_end < 0:
+    raise SystemExit("Could not locate DX11 ProcessSample for timing.")
+dx11_process = dx11_source[dx11_process_start:dx11_process_end]
+dx11_process = replace_once(
+    dx11_process,
+    dx11_process_start_marker + "\n\tREFERENCE_TIME rtStart, rtEnd;",
+    dx11_process_start_marker + """
+	LARGE_INTEGER processProbeBegin{};
+	QueryPerformanceCounter(&processProbeBegin);
+	LONGLONG copyProbeUs = 0;
+	LONGLONG render1ProbeUs = 0;
+	LONGLONG render2ProbeUs = 0;
+	REFERENCE_TIME rtStart, rtEnd;""",
+    "start DX11 stage timing")
+dx11_process = replace_once(
+    dx11_process,
+    '\tm_rtStart = rtStart;\n\tCRefTime rtClock(rtStart);\n\n\tHRESULT hr = CopySample(pSample);',
+    r"""	m_rtStart = rtStart;
+	CRefTime rtClock(rtStart);
+	const REFERENCE_TIME probeFrameStart = rtStart;
+
+	const auto logDx11Stages = [&](HRESULT result) {
+		LARGE_INTEGER processProbeEnd{};
+		QueryPerformanceCounter(&processProbeEnd);
+		const LONGLONG totalUs = MPCVRProbeElapsedUs(processProbeBegin.QuadPart, processProbeEnd.QuadPart);
+		if (!MPCVRProbeShouldLogStage(totalUs, result)) {
+			return;
+		}
+		MPCVRProbeLog(L"DX11STAGE qpc_begin=%lld qpc_end=%lld process_us=%lld copy_us=%lld render1_us=%lld render2_us=%lld frame_start_100ns=%lld double_frames=%d result_hr=0x%08X",
+			static_cast<long long>(processProbeBegin.QuadPart),
+			static_cast<long long>(processProbeEnd.QuadPart),
+			static_cast<long long>(totalUs),
+			static_cast<long long>(copyProbeUs),
+			static_cast<long long>(render1ProbeUs),
+			static_cast<long long>(render2ProbeUs),
+			static_cast<long long>(probeFrameStart),
+			static_cast<int>(m_bDoubleFrames),
+			static_cast<unsigned int>(result));
+	};
+
+	LARGE_INTEGER copyProbeBegin{};
+	LARGE_INTEGER copyProbeEnd{};
+	QueryPerformanceCounter(&copyProbeBegin);
+	HRESULT hr = CopySample(pSample);
+	QueryPerformanceCounter(&copyProbeEnd);
+	copyProbeUs = MPCVRProbeElapsedUs(copyProbeBegin.QuadPart, copyProbeEnd.QuadPart);""",
+    "time DX11 CopySample")
+dx11_process = replace_once(
+    dx11_process,
+    '\tif (FAILED(hr)) {\n\t\tm_RenderStats.failed++;\n\t\treturn hr;\n\t}',
+    '\tif (FAILED(hr)) {\n\t\tlogDx11Stages(hr);\n\t\tm_RenderStats.failed++;\n\t\treturn hr;\n\t}',
+    "log slow failed CopySample")
+dx11_process = replace_once(
+    dx11_process,
+    '\t// always Render(1) a frame after CopySample()\n\thr = Render(1, rtStart);',
+    '\t// always Render(1) a frame after CopySample()\n\tLARGE_INTEGER render1ProbeBegin{};\n\tLARGE_INTEGER render1ProbeEnd{};\n\tQueryPerformanceCounter(&render1ProbeBegin);\n\thr = Render(1, rtStart);\n\tQueryPerformanceCounter(&render1ProbeEnd);\n\trender1ProbeUs = MPCVRProbeElapsedUs(render1ProbeBegin.QuadPart, render1ProbeEnd.QuadPart);',
+    "time first DX11 render")
+dx11_process = replace_once(
+    dx11_process,
+    '\t\tif (rtEnd < rtClock) {\n\t\t\tm_RenderStats.dropped2++;\n\t\t\treturn S_FALSE; // skip frame\n\t\t}',
+    '\t\tif (rtEnd < rtClock) {\n\t\t\tm_RenderStats.dropped2++;\n\t\t\tlogDx11Stages(S_FALSE);\n\t\t\treturn S_FALSE; // skip frame\n\t\t}',
+    "log DX11 dropped frame")
+dx11_process = replace_once(
+    dx11_process,
+    '\t\thr = Render(2, rtStart);',
+    '\t\tLARGE_INTEGER render2ProbeBegin{};\n\t\tLARGE_INTEGER render2ProbeEnd{};\n\t\tQueryPerformanceCounter(&render2ProbeBegin);\n\t\thr = Render(2, rtStart);\n\t\tQueryPerformanceCounter(&render2ProbeEnd);\n\t\trender2ProbeUs = MPCVRProbeElapsedUs(render2ProbeBegin.QuadPart, render2ProbeEnd.QuadPart);',
+    "time second DX11 render")
+dx11_process = replace_once(
+    dx11_process,
+    '\treturn hr;\n}',
+    '\tlogDx11Stages(hr);\n\treturn hr;\n}',
+    "log slow DX11 ProcessSample")
+dx11_source = dx11_source[:dx11_process_start] + dx11_process + dx11_source[dx11_process_end:]
+
+# Time staging-texture Map calls individually; only slow/failing operations are written.
+map_start_marker = "HRESULT CDX11VideoProcessor::MemCopyToTexSrcVideo(const BYTE* srcData, const int srcPitch)\n{"
+map_start = dx11_source.find(map_start_marker)
+map_end = dx11_source.find("\nHRESULT CDX11VideoProcessor::SetDevice", map_start)
+if map_start < 0 or map_end < 0:
+    raise SystemExit("Could not locate MemCopyToTexSrcVideo for Map timing.")
+map_method = dx11_source[map_start:map_end]
+map_setup = r"""
+	auto probeMap = [&](ID3D11Texture2D* texture, const wchar_t* plane, D3D11_MAPPED_SUBRESOURCE* resource) -> HRESULT {
+		LARGE_INTEGER mapProbeBegin{};
+		LARGE_INTEGER mapProbeEnd{};
+		QueryPerformanceCounter(&mapProbeBegin);
+		HRESULT mapHr = m_pDeviceContext->Map(texture, 0, D3D11_MAP_WRITE_DISCARD, 0, resource);
+		QueryPerformanceCounter(&mapProbeEnd);
+		const LONGLONG mapUs = MPCVRProbeElapsedUs(mapProbeBegin.QuadPart, mapProbeEnd.QuadPart);
+		if (MPCVRProbeShouldLogStage(mapUs, mapHr)) {
+			MPCVRProbeLog(L"MAPPROBE qpc_begin=%lld qpc_end=%lld map_us=%lld plane=%ls result_hr=0x%08X",
+				static_cast<long long>(mapProbeBegin.QuadPart),
+				static_cast<long long>(mapProbeEnd.QuadPart),
+				static_cast<long long>(mapUs),
+				plane,
+				static_cast<unsigned int>(mapHr));
+		}
+		return mapHr;
+	};
+"""
+map_method = map_method.replace(map_start_marker, map_start_marker + map_setup, 1)
+old_ptex = 'm_pDeviceContext->Map(m_TexSrcVideo.pTexture, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource)'
+if map_method.count(old_ptex) != 2:
+    raise SystemExit("Expected two primary-texture Map sites in MemCopyToTexSrcVideo.")
+map_method = map_method.replace(old_ptex, 'probeMap(m_TexSrcVideo.pTexture, L"Y", &mappedResource)')
+map_method = replace_once(
+    map_method,
+    'm_pDeviceContext->Map(m_TexSrcVideo.pTexture2, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource)',
+    'probeMap(m_TexSrcVideo.pTexture2, L"U", &mappedResource)',
+    "probe chroma U Map")
+map_method = replace_once(
+    map_method,
+    'm_pDeviceContext->Map(m_TexSrcVideo.pTexture3, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource)',
+    'probeMap(m_TexSrcVideo.pTexture3, L"V", &mappedResource)',
+    "probe chroma V Map")
+dx11_source = dx11_source[:map_start] + map_method + dx11_source[map_end:]
+
+# Time Present only in the normal Render function, not the separate FillBlack path.
+render_start_marker = "HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTime)\n{"
+render_start = dx11_source.find(render_start_marker)
+render_end = dx11_source.find("\nHRESULT CDX11VideoProcessor::FillBlack()", render_start)
+if render_start < 0 or render_end < 0:
+    raise SystemExit("Could not locate DX11 Render for Present timing.")
+render_block = dx11_source[render_start:render_end]
+render_block = replace_once(
+    render_block,
+    '\tg_bPresent = true;\n\thr = m_pDXGISwapChain1->Present(1, 0);\n\tg_bPresent = false;',
+    r"""	g_bPresent = true;
+	LARGE_INTEGER presentProbeBegin{};
+	LARGE_INTEGER presentProbeEnd{};
+	QueryPerformanceCounter(&presentProbeBegin);
+	hr = m_pDXGISwapChain1->Present(1, 0);
+	g_bPresent = false;
+	QueryPerformanceCounter(&presentProbeEnd);
+	const LONGLONG presentProbeUs = MPCVRProbeElapsedUs(presentProbeBegin.QuadPart, presentProbeEnd.QuadPart);
+	if (MPCVRProbeShouldLogStage(presentProbeUs, hr)) {
+		MPCVRProbeLog(L"PRESENTPROBE qpc_begin=%lld qpc_end=%lld present_us=%lld frame_start_100ns=%lld field=%d result_hr=0x%08X",
+			static_cast<long long>(presentProbeBegin.QuadPart),
+			static_cast<long long>(presentProbeEnd.QuadPart),
+			static_cast<long long>(presentProbeUs),
+			static_cast<long long>(frameStartTime),
+			field,
+			static_cast<unsigned int>(hr));
+	}""",
+    "probe DXGI Present")
+dx11_source = dx11_source[:render_start] + render_block + dx11_source[render_end:]
+
+if "WaitForSingleObject(m_RenderEvent" in source or "WaitForSingleObject(m_RenderEvent" in dx11_source:
+    raise SystemExit("Unsafe diagnostic: polling auto-reset m_RenderEvent.")
+if not all(marker in source for marker in ("WAITPROBE_ENTER", "WAITPROBE_EXIT", "RECEIVEPROBE", "PROCESSPROBE")):
+    raise SystemExit("Renderer timing markers missing.")
+if not all(marker in dx11_source for marker in ("DX11STAGE", "MAPPROBE", "PRESENTPROBE")):
+    raise SystemExit("DX11 timing markers missing.")
+
 if "WAITPROBE_STATE" in source or "const REFERENCE_TIME wpRunStartBefore" in source:
     raise SystemExit("Old invasive state probes remain in source; refusing to continue.")
 
 CPP.write_text(source, encoding="utf-8", newline="\n")
 HEADER.write_text(header, encoding="utf-8", newline="\n")
-print(f"Patched {CPP} and {HEADER}: bounded wait tracing without event-handle polling; NewSegment/EndFlush only reset an atomic log budget.")
+DX11_CPP.write_text(dx11_source, encoding="utf-8", newline="\n")
+print(f"Patched {CPP}, {HEADER}, and {DX11_CPP}: bounded WaitForRenderTime, Receive, ProcessSample, Map, and Present timing without event-handle polling.")
