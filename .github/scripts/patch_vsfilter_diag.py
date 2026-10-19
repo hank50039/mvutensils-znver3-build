@@ -113,6 +113,39 @@ auto LogVideoInfo2FormatDiff(const CMediaType &oldMediaType, const AM_MEDIA_TYPE
                                    differentBytes, oldMediaType.cbFormat != newMediaType.cbFormat);
 }
 
+auto IsOnlyVideoInfo2ControlFlagsChanged(const CMediaType &oldMediaType, const AM_MEDIA_TYPE &newMediaType) -> bool {
+    if (!IsEqualGUID(oldMediaType.majortype, newMediaType.majortype) ||
+        !IsEqualGUID(oldMediaType.subtype, newMediaType.subtype) ||
+        oldMediaType.bFixedSizeSamples != newMediaType.bFixedSizeSamples ||
+        oldMediaType.bTemporalCompression != newMediaType.bTemporalCompression ||
+        oldMediaType.lSampleSize != newMediaType.lSampleSize ||
+        !IsEqualGUID(oldMediaType.formattype, FORMAT_VideoInfo2) ||
+        !IsEqualGUID(newMediaType.formattype, FORMAT_VideoInfo2) ||
+        oldMediaType.cbFormat != newMediaType.cbFormat ||
+        oldMediaType.cbFormat < sizeof(VIDEOINFOHEADER2) ||
+        oldMediaType.pbFormat == nullptr || newMediaType.pbFormat == nullptr) {
+        return false;
+    }
+
+    constexpr size_t controlFlagsOffset = offsetof(VIDEOINFOHEADER2, dwControlFlags);
+    constexpr size_t afterControlFlags = controlFlagsOffset + sizeof(DWORD);
+    if (std::memcmp(oldMediaType.pbFormat, newMediaType.pbFormat, controlFlagsOffset) != 0 ||
+        std::memcmp(oldMediaType.pbFormat + afterControlFlags, newMediaType.pbFormat + afterControlFlags,
+                    oldMediaType.cbFormat - afterControlFlags) != 0) {
+        return false;
+    }
+
+    const auto &oldHeader = *reinterpret_cast<const VIDEOINFOHEADER2 *>(oldMediaType.pbFormat);
+    const auto &newHeader = *reinterpret_cast<const VIDEOINFOHEADER2 *>(newMediaType.pbFormat);
+
+    // Exact, observed SDR metadata transition: previously unspecified to
+    // 4:2:0 / limited-range / BT.709 matrix, primaries and transfer function.
+    // The exact-value guard intentionally prevents swallowing other color-space
+    // changes (for example BT.2020/PQ or HLG).
+    return oldHeader.dwControlFlags == 0 &&
+           newHeader.dwControlFlags == 0x2880A581;
+}
+
 auto LogDynamicMediaTypeHeader(const CMediaType &oldMediaType, const AM_MEDIA_TYPE &newMediaType,
                                HRESULT timeHr, REFERENCE_TIME sampleStart, REFERENCE_TIME sampleStop,
                                HRESULT discontinuityHr) -> void {
@@ -172,8 +205,15 @@ receive_replacement = '''    // Sparse timing trace separates upstream inter-arr
     AM_MEDIA_TYPE *pmt;
     pSample->GetMediaType(&pmt);
     const bool traceHasDynamicMediaType = pmt != nullptr && pmt->pbFormat != nullptr;
+    bool traceMetadataOnlyFastPath = false;
     if (traceHasDynamicMediaType) {
         const CMediaType &oldMediaType = m_pInput->CurrentMediaType();
+        const bool alreadyHadPendingReconfigure = _isInputMediaTypeChanged || _needReloadScript;
+        traceMetadataOnlyFastPath = !alreadyHadPendingReconfigure &&
+            IsOnlyVideoInfo2ControlFlagsChanged(oldMediaType, *pmt);
+        Environment::GetInstance().Log(
+            L"DYNAMIC_MT_CLASSIFY metadata_only_bt709_candidate %d pending_reconfigure %d",
+            traceMetadataOnlyFastPath, alreadyHadPendingReconfigure);
         REFERENCE_TIME traceSampleStart = 0;
         REFERENCE_TIME traceSampleStop = 0;
         const HRESULT traceTimeHr = pSample->GetTime(&traceSampleStart, &traceSampleStop);
@@ -194,6 +234,24 @@ receive_replacement = '''    // Sparse timing trace separates upstream inter-arr
     if (pmt != nullptr && pmt->pbFormat != nullptr) {
         m_pInput->CurrentMediaType() = *pmt;'''
 s = s.replace(receive_anchor, receive_replacement, 1)
+
+# Set the existing format-change flag only for real layout changes. The narrow, exact
+# BT.709 SDR metadata-only case updates per-frame color props without resetting
+# the input prebuffer or reloading the VapourSynth script.
+flag_anchor = '''        _inputVideoFormat = Format::GetVideoFormat(*pmt, &MainFrameServer::GetInstance());
+        DeleteMediaType(pmt);
+        _isInputMediaTypeChanged = true;'''
+flag_replacement = '''        _inputVideoFormat = Format::GetVideoFormat(*pmt, &MainFrameServer::GetInstance());
+        DeleteMediaType(pmt);
+        _isInputMediaTypeChanged = !traceMetadataOnlyFastPath;
+        if (traceMetadataOnlyFastPath) {
+            Environment::GetInstance().Log(
+                L"DYNAMIC_MT_FASTPATH applied metadata_only_control_flags old_control 00000000 new_control 2880A581 downstream_type_kept_existing 1");
+        }'''
+if s.count(flag_anchor) != 1:
+    raise SystemExit("Could not uniquely locate input media-type reconfigure flag; refusing to patch")
+s = s.replace(flag_anchor, flag_replacement, 1)
+
 
 skip_anchor = '''    if (ShouldSkipFrame(pSample)) {
         m_bSampleSkipped = TRUE;
