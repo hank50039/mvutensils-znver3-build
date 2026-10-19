@@ -44,7 +44,7 @@ jobs:
           git -C upstream status --short
           git -C upstream rev-parse HEAD
 
-      - name: Apply targeted wait/state diagnostic patch
+      - name: Apply targeted wait diagnostic patch
         shell: pwsh
         run: |
           python tools/apply_mpcvr_wait_probe.py
@@ -53,6 +53,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Patched source failed git diff --check" }
           $patched = Select-String -Path upstream/Source/VideoRenderer.cpp -Pattern "WAITPROBE_ENTER|WAITPROBE_EXIT"
           if (-not $patched) { throw "Wait probe markers not found in patched source" }
+          $destructiveEventProbe = Select-String -Path upstream/Source/VideoRenderer.cpp -Pattern "WaitForSingleObject\s*\(\s*m_RenderEvent"
+          if ($destructiveEventProbe) { throw "Unsafe diagnostic: polling auto-reset m_RenderEvent can consume the render wake-up" }
           git -C upstream diff -- Source/VideoRenderer.cpp | Out-File -FilePath MPCVideoRendererWaitProbe.patch -Encoding utf8
           if ((Get-Item MPCVideoRendererWaitProbe.patch).Length -lt 1000) { throw "Patch diff unexpectedly small" }
 
@@ -115,7 +117,8 @@ jobs:
           $notes = @"
           Experimental diagnostic-only x64 Release build of MPC Video Renderer.
           Upstream commit: $env:UPSTREAM_COMMIT
-          Adds bounded WaitForRenderTime entry/exit records, sample timestamps, and lightweight renderer state/event snapshots. First 12 waits after each new segment/flush boundary are traced; later waits are logged only if they exceed 20 ms or fail.
+          Adds bounded WaitForRenderTime entry/exit records, sample timestamps, and renderer state snapshots. First 12 waits after each new segment/flush boundary are traced; later waits are logged only if they exceed 20 ms or fail.
+          It deliberately never polls m_RenderEvent: WaitForSingleObject on this auto-reset event can consume the render wake-up and freeze presentation.
           This build does not log synchronously from Run/Pause/Stop/Flush lifecycle methods and does not read the reference clock for diagnostics.
           New log: %LOCALAPPDATA%\MPCVideoRendererWaitProbeDiag.txt
           Not an official upstream release. Back up the existing renderer and restore it after testing.
