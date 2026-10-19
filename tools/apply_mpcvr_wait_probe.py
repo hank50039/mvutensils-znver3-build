@@ -173,7 +173,7 @@ HRESULT CMpcVideoRenderer::WaitForRenderTime()
     LARGE_INTEGER entryQpc{};
     QueryPerformanceCounter(&entryQpc);
     if (logEntry) {
-        WaitProbeLog(L"WAITPROBE_ENTER qpc=%lld sample_time_hr=0x%08X sample_start_100ns=%lld sample_stop_100ns=%lld state=%d filter_state=%d streaming=%d renderer_flushing=%d abort=%d advise=%llu run_start_100ns=%lld rt_start_100ns=%lld render_event=%lu thread_signal=%lu",
+        WaitProbeLog(L"WAITPROBE_ENTER qpc=%lld sample_time_hr=0x%08X sample_start_100ns=%lld sample_stop_100ns=%lld state=%d filter_state=%d streaming=%d renderer_flushing=%d abort=%d advise=%llu run_start_100ns=%lld rt_start_100ns=%lld",
             static_cast<long long>(entryQpc.QuadPart),
             static_cast<unsigned int>(sampleTimeHr),
             static_cast<long long>(sampleStart),
@@ -185,15 +185,15 @@ HRESULT CMpcVideoRenderer::WaitForRenderTime()
             static_cast<int>(m_bAbort),
             static_cast<unsigned long long>(m_dwAdvise),
             static_cast<long long>(m_tStart.m_time),
-            static_cast<long long>(m_rtStartTime),
-            static_cast<unsigned long>(WaitForSingleObject(m_RenderEvent, 0)),
-            static_cast<unsigned long>(WaitForSingleObject(m_ThreadSignal, 0)));
+            static_cast<long long>(m_rtStartTime));
     }
 
     LARGE_INTEGER waitBegin{};
     LARGE_INTEGER waitEnd{};
     QueryPerformanceCounter(&waitBegin);
-    // The base wait performs the original scheduling/wait behavior.
+    // Never poll m_RenderEvent to inspect its state: it is an auto-reset event, and
+    // WaitForSingleObject(..., 0) can consume the wake-up needed by the base wait.
+    // The base wait below performs the original scheduling/wait behavior.
     HRESULT hr = CBaseVideoRenderer2::WaitForRenderTime();
     QueryPerformanceCounter(&waitEnd);
     const LONGLONG waitUs = WaitProbeMicroseconds(waitBegin.QuadPart, waitEnd.QuadPart);
@@ -205,7 +205,7 @@ HRESULT CMpcVideoRenderer::WaitForRenderTime()
         if (m_pMediaSample) {
             afterSampleTimeHr = m_pMediaSample->GetTime(&afterStart, &afterStop);
         }
-        WaitProbeLog(L"WAITPROBE_EXIT qpc_begin=%lld qpc_end=%lld wait_us=%lld wait_hr=0x%08X sample_time_hr=0x%08X sample_start_100ns=%lld sample_stop_100ns=%lld state=%d filter_state=%d streaming=%d renderer_flushing=%d abort=%d advise=%llu run_start_100ns=%lld rt_start_100ns=%lld render_event=%lu thread_signal=%lu",
+        WaitProbeLog(L"WAITPROBE_EXIT qpc_begin=%lld qpc_end=%lld wait_us=%lld wait_hr=0x%08X sample_time_hr=0x%08X sample_start_100ns=%lld sample_stop_100ns=%lld state=%d filter_state=%d streaming=%d renderer_flushing=%d abort=%d advise=%llu run_start_100ns=%lld rt_start_100ns=%lld",
             static_cast<long long>(waitBegin.QuadPart),
             static_cast<long long>(waitEnd.QuadPart),
             static_cast<long long>(waitUs),
@@ -220,9 +220,7 @@ HRESULT CMpcVideoRenderer::WaitForRenderTime()
             static_cast<int>(m_bAbort),
             static_cast<unsigned long long>(m_dwAdvise),
             static_cast<long long>(m_tStart.m_time),
-            static_cast<long long>(m_rtStartTime),
-            static_cast<unsigned long>(WaitForSingleObject(m_RenderEvent, 0)),
-            static_cast<unsigned long>(WaitForSingleObject(m_ThreadSignal, 0)));
+            static_cast<long long>(m_rtStartTime));
     }
     return hr;
 }
@@ -241,4 +239,4 @@ if "WAITPROBE_STATE" in source or "const REFERENCE_TIME wpRunStartBefore" in sou
 
 CPP.write_text(source, encoding="utf-8", newline="\n")
 HEADER.write_text(header, encoding="utf-8", newline="\n")
-print(f"Patched {CPP} and {HEADER}: bounded wait-only tracing; playback lifecycle methods are unmodified.")
+print(f"Patched {CPP} and {HEADER}: bounded wait tracing without event-handle polling; NewSegment/EndFlush only reset an atomic log budget.")
