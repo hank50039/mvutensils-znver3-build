@@ -1,0 +1,81 @@
+name: Build PotPlayer VapourSynth diagnostic filter
+
+on:
+  push:
+    branches: [build-potplayer-cap28-formatdiag]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout build recipe
+        uses: actions/checkout@v4
+
+      - name: Checkout upstream AviSynth Filter at log-matched commit
+        uses: actions/checkout@v4
+        with:
+          repository: CrendKing/avisynth_filter
+          ref: a07ccda967261832233185f1e1d9979ba12593c0
+          path: avisynth_filter
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Apply Cap-28 and format/Receive diagnostics
+        shell: pwsh
+        run: |
+          python .github/scripts/patch_vsfilter_diag.py avisynth_filter
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build Release x64
+        shell: pwsh
+        working-directory: avisynth_filter
+        run: |
+          ./build.ps1 -Configuration Release -Platform x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify diagnostic markers and binary
+        shell: pwsh
+        run: |
+          $src = Get-Content avisynth_filter/filter_common/src/filter.cpp -Raw
+          $frame = Get-Content avisynth_filter/vapoursynth_filter/src/frame_handler.cpp -Raw
+          if ($src -notmatch 'FORMAT_DIFF_BYTE' -or $src -notmatch 'RECVTRACE AddInputSample_done' -or $src -notmatch 'DYNAMIC_MT') {
+            throw "Expected diagnostic source markers are missing."
+          }
+          if ($frame -notmatch 'MAX_PENDING_OUTPUT_FRAMES = 28') {
+            throw "Cap-28 source marker is missing."
+          }
+          $dll = Get-ChildItem avisynth_filter -Recurse -File -Filter vapoursynth_filter_x64.ax |
+            Where-Object { $_.FullName -match '\\x64\\Release\\' } |
+            Select-Object -First 1
+          if (-not $dll) {
+            $dll = Get-ChildItem avisynth_filter -Recurse -File -Filter vapoursynth_filter_x64.ax | Select-Object -First 1
+          }
+          if (-not $dll) { throw "Built vapoursynth_filter_x64.ax not found." }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item $dll.FullName dist/vapoursynth_filter_x64.ax -Force
+          $pdb = Get-ChildItem avisynth_filter -Recurse -File -Filter vapoursynth_filter_x64.pdb | Select-Object -First 1
+          if ($pdb) { Copy-Item $pdb.FullName dist/vapoursynth_filter_x64.pdb -Force }
+          @(
+            "Source repository: CrendKing/avisynth_filter"
+            "Source commit: a07ccda967261832233185f1e1d9979ba12593c0"
+            "Configuration: Release x64"
+            "Output: vapoursynth_filter_x64.ax"
+            "Diagnostic markers: FORMAT_DIFF_*, RECVTRACE, DYNAMIC_MT"
+            "Output request cap: 28"
+          ) | Set-Content dist/BUILD-INFO.txt
+          Get-FileHash dist/vapoursynth_filter_x64.ax -Algorithm SHA256 | Format-List | Out-String | Set-Content dist/SHA256.txt
+
+      - name: Upload compiled filter
+        uses: actions/upload-artifact@v4
+        with:
+          name: potplayer-vapoursynth-cap28-formatdiag-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
