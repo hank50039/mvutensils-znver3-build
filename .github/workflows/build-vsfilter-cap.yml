@@ -1,0 +1,95 @@
+name: Build VapourSynth Filter output-cap 16 experiment
+
+on:
+  push:
+    branches:
+      - vsfilter-output-cap-test
+    paths:
+      - '.github/workflows/build-vsfilter-cap.yml'
+      - 'vsfilter_output_queue_cap_16.patch'
+      - 'vsfilter_output_queue_cap_16_test_notes.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-vsfilter:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout experiment instructions
+        uses: actions/checkout@v4
+
+      - name: Clone and pin upstream VapourSynth Filter source
+        shell: pwsh
+        run: |
+          git clone https://github.com/CrendKing/avisynth_filter.git upstream
+          if ($LASTEXITCODE -ne 0) { throw "Failed to clone upstream source." }
+          git -C upstream checkout a07ccda967261832233185f1e1d9979ba12593c0
+          if ($LASTEXITCODE -ne 0) { throw "Failed to check out the pinned source commit." }
+          "UPSTREAM_COMMIT=$(git -C upstream rev-parse HEAD)" >> $env:GITHUB_ENV
+          git -C upstream log -1 --oneline
+
+      - name: Apply experimental queue cap and validate patch
+        shell: pwsh
+        run: |
+          git -C upstream apply "$env:GITHUB_WORKSPACE/vsfilter_output_queue_cap_16.patch"
+          if ($LASTEXITCODE -ne 0) { throw "Patch did not apply cleanly." }
+          git -C upstream diff --check
+          if ($LASTEXITCODE -ne 0) { throw "Patch whitespace/conflict validation failed." }
+          git -C upstream diff --stat
+          git -C upstream diff -- vapoursynth_filter/src/frame_handler.h vapoursynth_filter/src/frame_handler.cpp
+
+      - name: Build x64 Release filter
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:GITHUB_WORKSPACE "vsfilter-build.log"
+          Push-Location upstream
+          try {
+            & pwsh -NoProfile -File .\build.ps1 -Configuration Release -Platform x64 *> $log
+            $buildExitCode = $LASTEXITCODE
+          }
+          finally {
+            Pop-Location
+          }
+          Get-Content $log | Write-Output
+          if ($buildExitCode -ne 0) { throw "MSBuild failed with exit code $buildExitCode. See vsfilter-build.log." }
+
+      - name: Package test build and build metadata
+        if: success()
+        shell: pwsh
+        run: |
+          $dist = Join-Path $env:GITHUB_WORKSPACE "dist"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          $outputs = Get-ChildItem "upstream/x64/Release" -File | Where-Object { $_.Extension -in @(".ax", ".pdb") }
+          if (-not ($outputs | Where-Object { $_.Extension -eq ".ax" })) {
+            throw "No .ax filter binaries found in upstream/x64/Release."
+          }
+          foreach ($file in $outputs) { Copy-Item $file.FullName $dist }
+          @(
+            "Experiment: VapourSynth Filter output queue cap 16",
+            "Upstream repository: https://github.com/CrendKing/avisynth_filter",
+            "Upstream commit: $env:UPSTREAM_COMMIT",
+            "Patch: vsfilter_output_queue_cap_16.patch",
+            "Build: x64 Release",
+            "Status: compiled in GitHub Actions; playback and performance are not yet verified"
+          ) | Set-Content (Join-Path $dist "BUILD-INFO.txt")
+          Get-ChildItem $dist | Select-Object Name, Length | Format-Table -AutoSize
+
+      - name: Upload compiled filter artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vapoursynth-filter-output-cap-16-x64-release
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build log for diagnosis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vapoursynth-filter-output-cap-16-build-log
+          path: vsfilter-build.log
+          if-no-files-found: warn
+          retention-days: 14
