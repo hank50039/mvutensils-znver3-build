@@ -126,9 +126,9 @@ auto LogDynamicMediaTypeHeader(const CMediaType &oldMediaType, const AM_MEDIA_TY
         oldMediaType.cbFormat == newMediaType.cbFormat;
     const bool sameFormatBlock =
         oldMediaType.cbFormat == newMediaType.cbFormat &&
-        oldMediaType.cbFormat == 0 ? true :
-        (oldMediaType.pbFormat != nullptr && newMediaType.pbFormat != nullptr &&
-         std::memcmp(oldMediaType.pbFormat, newMediaType.pbFormat, oldMediaType.cbFormat) == 0);
+        (oldMediaType.cbFormat == 0 ||
+         (oldMediaType.pbFormat != nullptr && newMediaType.pbFormat != nullptr &&
+          std::memcmp(oldMediaType.pbFormat, newMediaType.pbFormat, oldMediaType.cbFormat) == 0));
 
     Environment::GetInstance().Log(
         L"DYNAMIC_MT time_hr 0x%08lX start %lld stop %lld discontinuity_hr 0x%08lX same_header %d same_format_block %d old major %08lX subtype %08lX formattype %08lX cbFormat %lu sampleSize %lu new major %08lX subtype %08lX formattype %08lX cbFormat %lu sampleSize %lu",
@@ -274,18 +274,14 @@ if s.count(request_anchor) != 1:
 s = s.replace(request_anchor, request_replacement, 1)
 
 callback_anchor = '''    FrameHandler *frameHandler = static_cast<FrameHandler *>(userData);
-    Environment::GetInstance().Log(L"Output frame %6d is ready, output queue size %2zd", n, frameHandler->_outputFrames.size());
-
-    if (f == nullptr) {'''
+    Environment::GetInstance().Log(L"Output frame %6d is ready, output queue size %2zd", n, frameHandler->_outputFrames.size());'''
 callback_replacement = '''    FrameHandler *frameHandler = static_cast<FrameHandler *>(userData);
     size_t outputQueueSize = 0;
     {
         const std::shared_lock sharedOutputLock(frameHandler->_outputMutex);
         outputQueueSize = frameHandler->_outputFrames.size();
     }
-    Environment::GetInstance().Log(L"Output frame %6d is ready, output queue size %2zd", n, outputQueueSize);
-
-    if (f == nullptr) {'''
+    Environment::GetInstance().Log(L"Output frame %6d is ready, output queue size %2zd", n, outputQueueSize);''''
 if s.count(callback_anchor) != 1:
     raise SystemExit("Could not uniquely locate async callback queue-size log; refusing to patch")
 s = s.replace(callback_anchor, callback_replacement, 1)
