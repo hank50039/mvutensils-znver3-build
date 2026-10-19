@@ -115,7 +115,8 @@ jobs:
           $notes = @"
           Experimental diagnostic-only x64 Release build of MPC Video Renderer.
           Upstream commit: $env:UPSTREAM_COMMIT
-          Adds WaitForRenderTime wait duration, sample/clock target delta, state/event snapshots, and Run/Pause/Stop/Flush/NewSegment traces.
+          Adds bounded WaitForRenderTime entry/exit records, sample timestamps, and lightweight renderer state/event snapshots. First 12 waits after each new segment/flush boundary are traced; later waits are logged only if they exceed 20 ms or fail.
+          This build does not log synchronously from Run/Pause/Stop/Flush lifecycle methods and does not read the reference clock for diagnostics.
           New log: %LOCALAPPDATA%\MPCVideoRendererWaitProbeDiag.txt
           Not an official upstream release. Back up the existing renderer and restore it after testing.
           "@
