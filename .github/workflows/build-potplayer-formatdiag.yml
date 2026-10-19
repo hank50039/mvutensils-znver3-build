@@ -53,15 +53,16 @@ jobs:
           if ($frame -notmatch 'MAX_PENDING_OUTPUT_FRAMES = 28') {
             throw "Cap-28 source marker is missing."
           }
-          $dll = Get-ChildItem avisynth_filter -Recurse -File -Filter vapoursynth_filter_x64.ax |
-            Where-Object { $_.FullName -match '\\x64\\Release\\' } |
-            Select-Object -First 1
+          $dllCandidates = Get-ChildItem avisynth_filter -Recurse -File -Filter *.ax |
+            Where-Object { $_.FullName -match '[\\/]x64[\\/]Release[\\/]' }
+          $dll = $dllCandidates | Where-Object { $_.Name -eq 'vapoursynth_filter_64.ax' } | Select-Object -First 1
+          if (-not $dll) { $dll = $dllCandidates | Select-Object -First 1 }
           if (-not $dll) {
-            $dll = Get-ChildItem avisynth_filter -Recurse -File -Filter vapoursynth_filter_x64.ax | Select-Object -First 1
+            Get-ChildItem avisynth_filter -Recurse -File | Where-Object { $_.Extension -eq '.ax' } | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Output
+            throw "Built .ax filter not found under the x64 Release output directory."
           }
-          if (-not $dll) { throw "Built vapoursynth_filter_x64.ax not found." }
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item $dll.FullName dist/vapoursynth_filter_x64.ax -Force
+          Copy-Item $dll.FullName (Join-Path dist $dll.Name) -Force
           $pdb = Get-ChildItem avisynth_filter -Recurse -File -Filter vapoursynth_filter_x64.pdb | Select-Object -First 1
           if ($pdb) { Copy-Item $pdb.FullName dist/vapoursynth_filter_x64.pdb -Force }
           @(
@@ -72,7 +73,7 @@ jobs:
             "Diagnostic markers: FORMAT_DIFF_*, RECVTRACE, DYNAMIC_MT"
             "Output request cap: 28"
           ) | Set-Content dist/BUILD-INFO.txt
-          Get-FileHash dist/vapoursynth_filter_x64.ax -Algorithm SHA256 | Format-List | Out-String | Set-Content dist/SHA256.txt
+          Get-FileHash (Join-Path dist $dll.Name) -Algorithm SHA256 | Format-List | Out-String | Set-Content dist/SHA256.txt
 
       - name: Upload compiled filter
         uses: actions/upload-artifact@v4
