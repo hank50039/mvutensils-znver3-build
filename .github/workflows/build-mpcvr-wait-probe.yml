@@ -71,7 +71,7 @@ jobs:
           if ($bytes.Length -lt 100000 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
             throw "Output does not appear to be a valid Windows PE DLL"
           }
-          $waitProbe = Select-String -Path upstream/Source/VideoRenderer.cpp -Pattern "MPCVideoRendererWaitProbeDiag.txt|WAITPROBE qpc_before"
+          $waitProbe = Select-String -Path upstream/Source/VideoRenderer.cpp -Pattern "WAITPROBE_ENTER|WAITPROBE_EXIT"
           if ($waitProbe.Count -lt 2) { throw "Wait probe logging markers missing from source" }
           if (-not (Select-String -Path upstream/Source/VideoRenderer.h -Pattern "WaitForRenderTime\(\) override")) { throw "WaitForRenderTime override declaration missing" }
 
