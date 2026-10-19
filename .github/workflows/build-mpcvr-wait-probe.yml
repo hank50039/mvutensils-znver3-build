@@ -1,0 +1,123 @@
+name: Build MPC Video Renderer wait probe
+
+on:
+  push:
+    branches: [mpcvr-wait-probe-20261019]
+    paths:
+      - ".github/workflows/build-mpcvr-wait-probe.yml"
+      - "tools/apply_mpcvr_wait_probe.py"
+      - "README-WAIT-PROBE.md"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-wait-probe:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout this build harness
+        uses: actions/checkout@v6
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Clone and pin upstream source
+        shell: pwsh
+        run: |
+          $upstreamCommit = "e55dd16fda83de20a4b4856538d8efc870ab1cb4"
+          git clone --no-checkout https://github.com/clsid2/MPCVideoRenderer.git upstream
+          if ($LASTEXITCODE -ne 0) { throw "git clone failed" }
+          git -C upstream checkout --detach $upstreamCommit
+          if ($LASTEXITCODE -ne 0) { throw "upstream commit checkout failed" }
+          git -C upstream submodule update --init --recursive
+          if ($LASTEXITCODE -ne 0) { throw "submodule checkout failed" }
+          # The project's pre-build script reads this legacy ref to populate revision.h.
+          git -C upstream branch Aleksoid1978/master $upstreamCommit
+          if ($LASTEXITCODE -ne 0) { throw "Could not create revision metadata ref" }
+          "UPSTREAM_COMMIT=$upstreamCommit" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          git -C upstream status --short
+          git -C upstream rev-parse HEAD
+
+      - name: Apply targeted wait/state diagnostic patch
+        shell: pwsh
+        run: |
+          python tools/apply_mpcvr_wait_probe.py
+          if ($LASTEXITCODE -ne 0) { throw "Diagnostic patcher failed" }
+          git -C upstream diff --check
+          if ($LASTEXITCODE -ne 0) { throw "Patched source failed git diff --check" }
+          $patched = Select-String -Path upstream/Source/VideoRenderer.cpp -Pattern "WAITPROBE_STATE|WAITPROBE qpc_before"
+          if (-not $patched) { throw "Wait probe markers not found in patched source" }
+          git -C upstream diff -- Source/VideoRenderer.cpp | Out-File -FilePath MPCVideoRendererWaitProbe.patch -Encoding utf8
+          if ((Get-Item MPCVideoRendererWaitProbe.patch).Length -lt 1000) { throw "Patch diff unexpectedly small" }
+
+      - name: Build x64 Release
+        shell: pwsh
+        run: |
+          msbuild upstream/MpcVideoRenderer.sln /nologo /m /verbosity:minimal /p:Configuration=Release /p:Platform=x64
+          if ($LASTEXITCODE -ne 0) { throw "MSBuild failed" }
+
+      - name: Verify and package build
+        shell: pwsh
+        run: |
+          $dll = "upstream/_bin/Filter_x64/MpcVideoRenderer64.ax"
+          if (-not (Test-Path $dll)) { throw "Expected DLL missing: $dll" }
+          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $dll))
+          if ($bytes.Length -lt 100000 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+            throw "Output does not appear to be a valid Windows PE DLL"
+          }
+          $waitProbe = Select-String -Path upstream/Source/VideoRenderer.cpp -Pattern "MPCVideoRendererWaitProbeDiag.txt|WAITPROBE qpc_before"
+          if ($waitProbe.Count -lt 2) { throw "Wait probe logging markers missing from source" }
+
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item $dll dist/MpcVideoRenderer64.ax
+          Copy-Item MPCVideoRendererWaitProbe.patch dist/
+          Copy-Item tools/apply_mpcvr_wait_probe.py dist/
+          Copy-Item README-WAIT-PROBE.md dist/README.txt
+
+          @(
+            "Build: MPC Video Renderer Wait Probe, experimental x64 Release"
+            "Upstream repository: https://github.com/clsid2/MPCVideoRenderer"
+            "Upstream commit: $env:UPSTREAM_COMMIT"
+            "Architecture: x64"
+            "Configuration: Release"
+            "Compiler: Visual Studio 2022 MSBuild"
+            "Patch: MPCVideoRendererWaitProbe.patch"
+            "New log: %LOCALAPPDATA%\MPCVideoRendererWaitProbeDiag.txt"
+            "This is a diagnostic-only experimental build, not an official release."
+          ) | Set-Content -Encoding utf8 dist/BUILD-INFO.txt
+
+          $hash = (Get-FileHash dist/MpcVideoRenderer64.ax -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  MpcVideoRenderer64.ax" | Set-Content -Encoding ascii dist/SHA256.txt
+
+          Compress-Archive -Path dist/* -DestinationPath MPCVideoRenderer-WaitProbe-x64.zip -Force
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: MPCVideoRenderer-WaitProbe-x64
+          path: MPCVideoRenderer-WaitProbe-x64.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish diagnostic pre-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "mpcvr-wait-probe-20261019-${{ github.run_number }}"
+          $notes = @"
+          Experimental diagnostic-only x64 Release build of MPC Video Renderer.
+          Upstream commit: $env:UPSTREAM_COMMIT
+          Adds WaitForRenderTime wait duration, sample/clock target delta, state/event snapshots, and Run/Pause/Stop/Flush/NewSegment traces.
+          New log: %LOCALAPPDATA%\MPCVideoRendererWaitProbeDiag.txt
+          Not an official upstream release. Back up the existing renderer and restore it after testing.
+          "@
+          Set-Content -Path release-notes.md -Value $notes -Encoding utf8
+          gh release create $tag MPCVideoRenderer-WaitProbe-x64.zip --repo "${{ github.repository }}" --title "MPC Video Renderer Wait Probe x64 (experimental)" --notes-file release-notes.md --prerelease
+          if ($LASTEXITCODE -ne 0) { throw "gh release creation failed" }
