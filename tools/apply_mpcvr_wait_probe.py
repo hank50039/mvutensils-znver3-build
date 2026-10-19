@@ -96,7 +96,7 @@ static void WaitProbeLog(const wchar_t* format, ...)
         static_cast<long long>(wps_qpc.QuadPart), eventName, phaseName, \
         static_cast<int>(m_State), static_cast<int>(m_filterState), static_cast<int>(m_bStreaming), \
         static_cast<int>(m_bFlushing), wps_input_flush, static_cast<int>(m_bAbort), \
-        static_cast<unsigned long long>(m_dwAdvise), static_cast<long long>(m_tStart), \
+        static_cast<unsigned long long>(m_dwAdvise), static_cast<long long>(m_tStart.m_time), \
         static_cast<long long>(m_rtStartTime), static_cast<unsigned int>(wps_clock_hr), \
         static_cast<long long>(wps_clock), static_cast<unsigned long>(wps_render_event), \
         static_cast<unsigned long>(wps_thread_signal)); \
@@ -151,7 +151,7 @@ receive_block = r"""
     const HRESULT wpSampleTimeHr = pSample->GetTime(&wpSampleStart, &wpSampleStop);
     REFERENCE_TIME wpClockBefore = 0;
     const HRESULT wpClockHrBefore = m_pClock ? m_pClock->GetTime(&wpClockBefore) : E_POINTER;
-    const REFERENCE_TIME wpRunStartBefore = m_tStart;
+    const REFERENCE_TIME wpRunStartBefore = m_tStart.m_time;
     const REFERENCE_TIME wpRtStartBefore = m_rtStartTime;
     const int wpStateBefore = static_cast<int>(m_State);
     const int wpFilterStateBefore = static_cast<int>(m_filterState);
@@ -172,7 +172,7 @@ receive_block = r"""
 
     REFERENCE_TIME wpClockAfter = 0;
     const HRESULT wpClockHrAfter = m_pClock ? m_pClock->GetTime(&wpClockAfter) : E_POINTER;
-    const REFERENCE_TIME wpRunStartAfter = m_tStart;
+    const REFERENCE_TIME wpRunStartAfter = m_tStart.m_time;
     const REFERENCE_TIME wpRtStartAfter = m_rtStartTime;
     const int wpStateAfter = static_cast<int>(m_State);
     const int wpFilterStateAfter = static_cast<int>(m_filterState);
