@@ -102,7 +102,7 @@ diff --git a/filter_common/src/filter.cpp b/filter_common/src/filter.cpp
  #include "filter.h"
  
  #include "constants.h"
-@@ -319,11 +321,41 @@ auto CSynthFilter::Receive(IMediaSample *pSample) -> HRESULT {
+@@ -319,8 +321,36 @@ auto CSynthFilter::Receive(IMediaSample *pSample) -> HRESULT {
      AM_MEDIA_TYPE *pmt;
      pSample->GetMediaType(&pmt);
      if (pmt != nullptr && pmt->pbFormat != nullptr) {
