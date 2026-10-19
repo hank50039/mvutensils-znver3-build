@@ -213,7 +213,7 @@ receive_block = r"""
     if (FAILED(hr)) {
 """
 # Preserve the original failure block after the line we replace.
-old_receive = "hr = WaitForRenderTime();\n\tif (FAILED(hr)) {"
+receive_block = receive_block.lstrip("\n")\nold_receive = "\thr = WaitForRenderTime();\n\tif (FAILED(hr)) {"
 replace_once(old_receive, receive_block, "instrument WaitForRenderTime")
 
 CPP.write_text(source, encoding="utf-8", newline="\n")
