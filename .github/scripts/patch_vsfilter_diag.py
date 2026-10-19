@@ -281,7 +281,7 @@ callback_replacement = '''    FrameHandler *frameHandler = static_cast<FrameHand
         const std::shared_lock sharedOutputLock(frameHandler->_outputMutex);
         outputQueueSize = frameHandler->_outputFrames.size();
     }
-    Environment::GetInstance().Log(L"Output frame %6d is ready, output queue size %2zd", n, outputQueueSize);''''
+    Environment::GetInstance().Log(L"Output frame %6d is ready, output queue size %2zd", n, outputQueueSize);'''
 if s.count(callback_anchor) != 1:
     raise SystemExit("Could not uniquely locate async callback queue-size log; refusing to patch")
 s = s.replace(callback_anchor, callback_replacement, 1)
