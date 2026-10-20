@@ -319,7 +319,7 @@ jobs:
 
           The file is process-specific and is initialized on the first diagnostic record. Restore the backed-up DLL after diagnosis.
           """
-          readme = "\\n".join(line.strip() for line in readme.splitlines()).strip() + "\\n"
+          readme = "\n".join(line.strip() for line in readme.splitlines()).strip() + "\n"
 
           out = root / "MVUtensils-FrameTimingDiag-AVX2.zip"
           with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as z:
