@@ -12,10 +12,10 @@ This workflow builds a diagnostic-only x64 MPC Video Renderer from a pinned upst
 
 The single text log can contain:
 
-- `WAITPROBE_ENTER/EXIT`: original `WaitForRenderTime()` wait duration, sample timestamp, HRESULT and renderer state. The first 12 waits after each segment/flush boundary are captured; later records are kept only for slow waits or failures.
-- `RECEIVEPROBE`: total synchronous `Receive()` duration, return phase, sample timestamp and state snapshots, only when slow or failing.
-- `PROCESSPROBE`: total `DoRenderSample()` / video-processor duration.
-- `DX11STAGE`: total DX11 `ProcessSample()` duration split into `CopySample()`, first render pass and optional second render pass.
+- `WAITPROBE_ENTER/EXIT`: original `WaitForRenderTime()` wait duration, sample timestamp and state snapshots from both before and after the wait, HRESULT, renderer instance pointer, process ID and thread ID. Entry snapshots are taken for every wait; the first 12 full entry records after each segment/flush boundary are captured, while later exit records are kept only for slow waits or failures.
+- `RECEIVEPROBE`: total synchronous `Receive()` duration, return phase, sample timestamps from entry and exit, state snapshots, renderer instance pointer, process ID and thread ID, only when slow or failing.
+- `PROCESSPROBE`: total `DoRenderSample()` / video-processor duration, renderer instance pointer, process ID and thread ID.
+- `DX11STAGE`: total DX11 `ProcessSample()` duration split into `CopySample()`, first render pass and optional second render pass, with processor instance pointer, process ID and thread ID. `MAPPROBE` and `PRESENTPROBE` also carry these identifiers.
 - `MAPPROBE`: individual staging-texture `Map()` calls inside `MemCopyToTexSrcVideo()`, including the plane label, duration and HRESULT.
 - `PRESENTPROBE`: DXGI `Present()` duration.
 

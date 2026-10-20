@@ -44,7 +44,7 @@ jobs:
           git -C upstream status --short
           git -C upstream rev-parse HEAD
 
-      - name: Apply targeted wait diagnostic patch
+      - name: Apply targeted stage diagnostic patch
         shell: pwsh
         run: |
           python tools/apply_mpcvr_wait_probe.py
@@ -55,6 +55,10 @@ jobs:
           if (-not $rendererMarkers) { throw "Renderer stage timing markers not found in patched source" }
           $dx11Markers = Select-String -Path upstream/Source/DX11VideoProcessor.cpp -Pattern "DX11STAGE|MAPPROBE|PRESENTPROBE"
           if (-not $dx11Markers) { throw "DX11 stage timing markers not found in patched source" }
+          if (-not (Select-String -Path upstream/Source/VideoRenderer.cpp -SimpleMatch -Pattern "renderer_instance=%p process_id=%lu thread_id=%lu")) { throw "Renderer instance/thread markers missing" }
+          if (-not (Select-String -Path upstream/Source/VideoRenderer.cpp -SimpleMatch -Pattern "sample_begin_time_hr=")) { throw "Wait sample entry snapshot missing" }
+          if (-not (Select-String -Path upstream/Source/VideoRenderer.cpp -SimpleMatch -Pattern "state_begin=%d state_end=%d")) { throw "Wait entry/exit state snapshots missing" }
+          if (-not (Select-String -Path upstream/Source/DX11VideoProcessor.cpp -SimpleMatch -Pattern "processor_instance=%p process_id=%lu thread_id=%lu")) { throw "DX11 instance/thread markers missing" }
           $destructiveEventProbe = Select-String -Path upstream/Source/VideoRenderer.cpp,upstream/Source/DX11VideoProcessor.cpp -Pattern "WaitForSingleObject\s*\(\s*m_RenderEvent"
           if ($destructiveEventProbe) { throw "Unsafe diagnostic: polling auto-reset m_RenderEvent can consume the render wake-up" }
           git -C upstream diff -- Source/VideoRenderer.cpp Source/DX11VideoProcessor.cpp | Out-File -FilePath MPCVideoRendererStageProbe.patch -Encoding utf8
@@ -79,6 +83,8 @@ jobs:
           if ($waitProbe.Count -lt 4) { throw "Renderer timing markers missing from source" }
           $dx11Probe = Select-String -Path upstream/Source/DX11VideoProcessor.cpp -Pattern "DX11STAGE|MAPPROBE|PRESENTPROBE"
           if ($dx11Probe.Count -lt 3) { throw "DX11 timing markers missing from source" }
+          if (-not (Select-String -Path upstream/Source/VideoRenderer.cpp -SimpleMatch -Pattern "sample_begin_time_hr=")) { throw "Wait sample entry snapshot missing" }
+          if (-not (Select-String -Path upstream/Source/DX11VideoProcessor.cpp -SimpleMatch -Pattern "processor_instance=%p process_id=%lu thread_id=%lu")) { throw "DX11 instance/thread markers missing" }
           if (-not (Select-String -Path upstream/Source/VideoRenderer.h -Pattern "WaitForRenderTime\(\) override")) { throw "WaitForRenderTime override declaration missing" }
           if (-not (Select-String -Path upstream/Source/VideoRenderer.h -Pattern "MPCVRProbeShouldLogStage")) { throw "Shared stage-probe declarations missing" }
 
@@ -122,7 +128,7 @@ jobs:
           $notes = @"
           Experimental diagnostic-only x64 Release build of MPC Video Renderer.
           Upstream commit: $env:UPSTREAM_COMMIT
-          Adds bounded WaitForRenderTime entry/exit records plus slow/failing timing records for the full Receive call, ProcessSample, DX11 CopySample/Render stages, individual staging-texture Map calls, and DXGI Present. Normal stage records use a 20 ms threshold; stalls of 100 ms or more have a separate bounded budget. The first 12 WaitForRenderTime calls after each segment/flush boundary are traced.
+          Adds bounded WaitForRenderTime entry/exit records plus slow/failing timing records for the full Receive call, ProcessSample, DX11 CopySample/Render stages, individual staging-texture Map calls, and DXGI Present. Wait/Receive records include renderer instance, process/thread IDs, sample timestamps at wait entry and exit, and before/after state snapshots so separate instances and lifecycle transitions can be distinguished. Normal stage records use a 20 ms threshold; stalls of 100 ms or more have a separate bounded budget. The first 12 WaitForRenderTime calls after each segment/flush boundary are traced.
           It deliberately never polls m_RenderEvent: WaitForSingleObject on this auto-reset event can consume the render wake-up and freeze presentation.
           The rendering decisions are unchanged. The diagnostic does not log from Run/Pause/Stop/Flush lifecycle methods or read the reference clock; slow/failing stage calls append records synchronously to the diagnostic text file.
           New log: %LOCALAPPDATA%\MPCVideoRendererWaitProbeDiag.txt

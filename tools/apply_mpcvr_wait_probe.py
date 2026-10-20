@@ -193,29 +193,42 @@ wait_method = r"""
 HRESULT CMpcVideoRenderer::WaitForRenderTime()
 {
     const bool logEntry = WaitProbeConsumeBudget();
-    REFERENCE_TIME sampleStart = 0;
-    REFERENCE_TIME sampleStop = 0;
-    HRESULT sampleTimeHr = E_POINTER;
-    if (logEntry && m_pMediaSample) {
-        sampleTimeHr = m_pMediaSample->GetTime(&sampleStart, &sampleStop);
-    }
+    void* rendererInstance = static_cast<void*>(this);
+    const DWORD waitProcessId = GetCurrentProcessId();
+    const DWORD waitThreadId = GetCurrentThreadId();
+    REFERENCE_TIME sampleStartAtEntry = 0;
+    REFERENCE_TIME sampleStopAtEntry = 0;
+    HRESULT sampleTimeHrAtEntry = m_pMediaSample
+        ? m_pMediaSample->GetTime(&sampleStartAtEntry, &sampleStopAtEntry)
+        : E_POINTER;
+    const int waitStateAtEntry = static_cast<int>(m_State);
+    const int waitFilterStateAtEntry = static_cast<int>(m_filterState);
+    const int waitStreamingAtEntry = static_cast<int>(m_bStreaming);
+    const int waitFlushingAtEntry = static_cast<int>(m_bFlushing);
+    const int waitAbortAtEntry = static_cast<int>(m_bAbort);
+    const unsigned long long waitAdviseAtEntry = static_cast<unsigned long long>(m_dwAdvise);
+    const REFERENCE_TIME waitRunStartAtEntry = m_tStart.m_time;
+    const REFERENCE_TIME waitRtStartAtEntry = m_rtStartTime;
 
     LARGE_INTEGER entryQpc{};
     QueryPerformanceCounter(&entryQpc);
     if (logEntry) {
-        MPCVRProbeLog(L"WAITPROBE_ENTER qpc=%lld sample_time_hr=0x%08X sample_start_100ns=%lld sample_stop_100ns=%lld state=%d filter_state=%d streaming=%d renderer_flushing=%d abort=%d advise=%llu run_start_100ns=%lld rt_start_100ns=%lld",
+        MPCVRProbeLog(L"WAITPROBE_ENTER renderer_instance=%p process_id=%lu thread_id=%lu qpc=%lld sample_time_hr=0x%08X sample_start_100ns=%lld sample_stop_100ns=%lld state=%d filter_state=%d streaming=%d renderer_flushing=%d abort=%d advise=%llu run_start_100ns=%lld rt_start_100ns=%lld",
+            rendererInstance,
+            static_cast<unsigned long>(waitProcessId),
+            static_cast<unsigned long>(waitThreadId),
             static_cast<long long>(entryQpc.QuadPart),
-            static_cast<unsigned int>(sampleTimeHr),
-            static_cast<long long>(sampleStart),
-            static_cast<long long>(sampleStop),
-            static_cast<int>(m_State),
-            static_cast<int>(m_filterState),
-            static_cast<int>(m_bStreaming),
-            static_cast<int>(m_bFlushing),
-            static_cast<int>(m_bAbort),
-            static_cast<unsigned long long>(m_dwAdvise),
-            static_cast<long long>(m_tStart.m_time),
-            static_cast<long long>(m_rtStartTime));
+            static_cast<unsigned int>(sampleTimeHrAtEntry),
+            static_cast<long long>(sampleStartAtEntry),
+            static_cast<long long>(sampleStopAtEntry),
+            waitStateAtEntry,
+            waitFilterStateAtEntry,
+            waitStreamingAtEntry,
+            waitFlushingAtEntry,
+            waitAbortAtEntry,
+            waitAdviseAtEntry,
+            static_cast<long long>(waitRunStartAtEntry),
+            static_cast<long long>(waitRtStartAtEntry));
     }
 
     LARGE_INTEGER waitBegin{};
@@ -235,21 +248,35 @@ HRESULT CMpcVideoRenderer::WaitForRenderTime()
         if (m_pMediaSample) {
             afterSampleTimeHr = m_pMediaSample->GetTime(&afterStart, &afterStop);
         }
-        MPCVRProbeLog(L"WAITPROBE_EXIT qpc_begin=%lld qpc_end=%lld wait_us=%lld wait_hr=0x%08X sample_time_hr=0x%08X sample_start_100ns=%lld sample_stop_100ns=%lld state=%d filter_state=%d streaming=%d renderer_flushing=%d abort=%d advise=%llu run_start_100ns=%lld rt_start_100ns=%lld",
+        MPCVRProbeLog(L"WAITPROBE_EXIT renderer_instance=%p process_id=%lu thread_id=%lu qpc_begin=%lld qpc_end=%lld wait_us=%lld wait_hr=0x%08X sample_begin_time_hr=0x%08X sample_begin_start_100ns=%lld sample_begin_stop_100ns=%lld sample_end_time_hr=0x%08X sample_end_start_100ns=%lld sample_end_stop_100ns=%lld state_begin=%d state_end=%d filter_state_begin=%d filter_state_end=%d streaming_begin=%d streaming_end=%d flushing_begin=%d flushing_end=%d abort_begin=%d abort_end=%d advise_begin=%llu advise_end=%llu run_start_begin_100ns=%lld run_start_end_100ns=%lld rt_start_begin_100ns=%lld rt_start_end_100ns=%lld",
+            rendererInstance,
+            static_cast<unsigned long>(waitProcessId),
+            static_cast<unsigned long>(waitThreadId),
             static_cast<long long>(waitBegin.QuadPart),
             static_cast<long long>(waitEnd.QuadPart),
             static_cast<long long>(waitUs),
             static_cast<unsigned int>(hr),
+            static_cast<unsigned int>(sampleTimeHrAtEntry),
+            static_cast<long long>(sampleStartAtEntry),
+            static_cast<long long>(sampleStopAtEntry),
             static_cast<unsigned int>(afterSampleTimeHr),
             static_cast<long long>(afterStart),
             static_cast<long long>(afterStop),
+            waitStateAtEntry,
             static_cast<int>(m_State),
+            waitFilterStateAtEntry,
             static_cast<int>(m_filterState),
+            waitStreamingAtEntry,
             static_cast<int>(m_bStreaming),
+            waitFlushingAtEntry,
             static_cast<int>(m_bFlushing),
+            waitAbortAtEntry,
             static_cast<int>(m_bAbort),
+            waitAdviseAtEntry,
             static_cast<unsigned long long>(m_dwAdvise),
+            static_cast<long long>(waitRunStartAtEntry),
             static_cast<long long>(m_tStart.m_time),
+            static_cast<long long>(waitRtStartAtEntry),
             static_cast<long long>(m_rtStartTime));
     }
     return hr;
@@ -276,6 +303,14 @@ receive_block = source[receive_start:receive_end]
 receive_setup = r"""
     LARGE_INTEGER receiveProbeBegin{};
     QueryPerformanceCounter(&receiveProbeBegin);
+    void* receiveRendererInstance = static_cast<void*>(this);
+    const DWORD receiveProcessId = GetCurrentProcessId();
+    const DWORD receiveThreadId = GetCurrentThreadId();
+    REFERENCE_TIME receiveSampleStartAtEntry = 0;
+    REFERENCE_TIME receiveSampleStopAtEntry = 0;
+    const HRESULT receiveSampleTimeHrAtEntry = pSample
+        ? pSample->GetTime(&receiveSampleStartAtEntry, &receiveSampleStopAtEntry)
+        : E_POINTER;
     const int receiveStateBefore = static_cast<int>(m_State);
     const int receiveFilterStateBefore = static_cast<int>(m_filterState);
     const int receiveStreamingBefore = static_cast<int>(m_bStreaming);
@@ -290,12 +325,18 @@ receive_setup = r"""
         REFERENCE_TIME sampleStart = 0;
         REFERENCE_TIME sampleStop = 0;
         const HRESULT sampleTimeHr = pSample ? pSample->GetTime(&sampleStart, &sampleStop) : E_POINTER;
-        MPCVRProbeLog(L"RECEIVEPROBE qpc_begin=%lld qpc_end=%lld receive_us=%lld phase=%ls result_hr=0x%08X sample_time_hr=0x%08X sample_start_100ns=%lld sample_stop_100ns=%lld state_before=%d state_after=%d filter_state_before=%d filter_state_after=%d streaming_before=%d streaming_after=%d flushing_before=%d flushing_after=%d",
+        MPCVRProbeLog(L"RECEIVEPROBE renderer_instance=%p process_id=%lu thread_id=%lu qpc_begin=%lld qpc_end=%lld receive_us=%lld phase=%ls result_hr=0x%08X sample_begin_time_hr=0x%08X sample_begin_start_100ns=%lld sample_begin_stop_100ns=%lld sample_end_time_hr=0x%08X sample_end_start_100ns=%lld sample_end_stop_100ns=%lld state_before=%d state_after=%d filter_state_before=%d filter_state_after=%d streaming_before=%d streaming_after=%d flushing_before=%d flushing_after=%d",
+            receiveRendererInstance,
+            static_cast<unsigned long>(receiveProcessId),
+            static_cast<unsigned long>(receiveThreadId),
             static_cast<long long>(receiveProbeBegin.QuadPart),
             static_cast<long long>(receiveProbeEnd.QuadPart),
             static_cast<long long>(receiveUs),
             phase,
             static_cast<unsigned int>(result),
+            static_cast<unsigned int>(receiveSampleTimeHrAtEntry),
+            static_cast<long long>(receiveSampleStartAtEntry),
+            static_cast<long long>(receiveSampleStopAtEntry),
             static_cast<unsigned int>(sampleTimeHr),
             static_cast<long long>(sampleStart),
             static_cast<long long>(sampleStop),
@@ -359,7 +400,10 @@ source = replace_once(
 		REFERENCE_TIME sampleStart = 0;
 		REFERENCE_TIME sampleStop = 0;
 		const HRESULT sampleTimeHr = pSample->GetTime(&sampleStart, &sampleStop);
-		MPCVRProbeLog(L"PROCESSPROBE qpc_begin=%lld qpc_end=%lld process_us=%lld result_hr=0x%08X sample_time_hr=0x%08X sample_start_100ns=%lld sample_stop_100ns=%lld",
+		MPCVRProbeLog(L"PROCESSPROBE renderer_instance=%p process_id=%lu thread_id=%lu qpc_begin=%lld qpc_end=%lld process_us=%lld result_hr=0x%08X sample_time_hr=0x%08X sample_start_100ns=%lld sample_stop_100ns=%lld",
+			static_cast<void*>(this),
+			static_cast<unsigned long>(GetCurrentProcessId()),
+			static_cast<unsigned long>(GetCurrentThreadId()),
 			static_cast<long long>(processProbeBegin.QuadPart),
 			static_cast<long long>(processProbeEnd.QuadPart),
 			static_cast<long long>(processProbeUs),
@@ -402,7 +446,10 @@ dx11_process = replace_once(
 		if (!MPCVRProbeShouldLogStage(totalUs, result)) {
 			return;
 		}
-		MPCVRProbeLog(L"DX11STAGE qpc_begin=%lld qpc_end=%lld process_us=%lld copy_us=%lld render1_us=%lld render2_us=%lld frame_start_100ns=%lld double_frames=%d result_hr=0x%08X",
+		MPCVRProbeLog(L"DX11STAGE processor_instance=%p process_id=%lu thread_id=%lu qpc_begin=%lld qpc_end=%lld process_us=%lld copy_us=%lld render1_us=%lld render2_us=%lld frame_start_100ns=%lld double_frames=%d result_hr=0x%08X",
+			static_cast<void*>(this),
+			static_cast<unsigned long>(GetCurrentProcessId()),
+			static_cast<unsigned long>(GetCurrentThreadId()),
 			static_cast<long long>(processProbeBegin.QuadPart),
 			static_cast<long long>(processProbeEnd.QuadPart),
 			static_cast<long long>(totalUs),
@@ -464,7 +511,10 @@ map_setup = r"""
 		QueryPerformanceCounter(&mapProbeEnd);
 		const LONGLONG mapUs = MPCVRProbeElapsedUs(mapProbeBegin.QuadPart, mapProbeEnd.QuadPart);
 		if (MPCVRProbeShouldLogStage(mapUs, mapHr)) {
-			MPCVRProbeLog(L"MAPPROBE qpc_begin=%lld qpc_end=%lld map_us=%lld plane=%ls result_hr=0x%08X",
+			MPCVRProbeLog(L"MAPPROBE processor_instance=%p process_id=%lu thread_id=%lu qpc_begin=%lld qpc_end=%lld map_us=%lld plane=%ls result_hr=0x%08X",
+				static_cast<void*>(this),
+				static_cast<unsigned long>(GetCurrentProcessId()),
+				static_cast<unsigned long>(GetCurrentThreadId()),
 				static_cast<long long>(mapProbeBegin.QuadPart),
 				static_cast<long long>(mapProbeEnd.QuadPart),
 				static_cast<long long>(mapUs),
@@ -510,7 +560,10 @@ render_block = replace_once(
 	QueryPerformanceCounter(&presentProbeEnd);
 	const LONGLONG presentProbeUs = MPCVRProbeElapsedUs(presentProbeBegin.QuadPart, presentProbeEnd.QuadPart);
 	if (MPCVRProbeShouldLogStage(presentProbeUs, hr)) {
-		MPCVRProbeLog(L"PRESENTPROBE qpc_begin=%lld qpc_end=%lld present_us=%lld frame_start_100ns=%lld field=%d result_hr=0x%08X",
+		MPCVRProbeLog(L"PRESENTPROBE processor_instance=%p process_id=%lu thread_id=%lu qpc_begin=%lld qpc_end=%lld present_us=%lld frame_start_100ns=%lld field=%d result_hr=0x%08X",
+			static_cast<void*>(this),
+			static_cast<unsigned long>(GetCurrentProcessId()),
+			static_cast<unsigned long>(GetCurrentThreadId()),
 			static_cast<long long>(presentProbeBegin.QuadPart),
 			static_cast<long long>(presentProbeEnd.QuadPart),
 			static_cast<long long>(presentProbeUs),
