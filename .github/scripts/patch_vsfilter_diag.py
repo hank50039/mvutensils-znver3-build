@@ -240,9 +240,9 @@ s = s.replace(receive_anchor, receive_replacement, 1)
 flag_anchor = '''        _inputVideoFormat = Format::GetVideoFormat(*pmt, &MainFrameServer::GetInstance());
         DeleteMediaType(pmt);
         _isInputMediaTypeChanged = true;'''
-flag_replacement = '''        _inputVideoFormat = Format::GetVideoFormat(*pmt, &MainFrameServer::GetInstance())
-        DeleteMediaType(pmt)
-        _isInputMediaTypeChanged = true'''
+flag_replacement = '''        _inputVideoFormat = Format::GetVideoFormat(*pmt, &MainFrameServer::GetInstance());
+        DeleteMediaType(pmt);
+        _isInputMediaTypeChanged = true;'''
 if s.count(flag_anchor) != 1:
     raise SystemExit("Could not uniquely locate input media-type reconfigure flag; refusing to patch")
 s = s.replace(flag_anchor, flag_replacement, 1)
