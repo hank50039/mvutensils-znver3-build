@@ -242,7 +242,11 @@ flag_anchor = '''        _inputVideoFormat = Format::GetVideoFormat(*pmt, &MainF
         _isInputMediaTypeChanged = true;'''
 flag_replacement = '''        _inputVideoFormat = Format::GetVideoFormat(*pmt, &MainFrameServer::GetInstance());
         DeleteMediaType(pmt);
-        _isInputMediaTypeChanged = true;'''
+        _isInputMediaTypeChanged = !traceMetadataOnlyCandidate;
+        if (traceMetadataOnlyCandidate) {
+            Environment::GetInstance().Log(
+                L"DYNAMIC_MT_FASTPATH applied metadata_only_control_flags old_control 00000000 new_control 2880A581 downstream_type_kept_existing 1");
+        }'''
 if s.count(flag_anchor) != 1:
     raise SystemExit("Could not uniquely locate input media-type reconfigure flag; refusing to patch")
 s = s.replace(flag_anchor, flag_replacement, 1)
