@@ -205,15 +205,15 @@ receive_replacement = '''    // Sparse timing trace separates upstream inter-arr
     AM_MEDIA_TYPE *pmt;
     pSample->GetMediaType(&pmt);
     const bool traceHasDynamicMediaType = pmt != nullptr && pmt->pbFormat != nullptr;
-    bool traceMetadataOnlyFastPath = false;
+    bool traceMetadataOnlyCandidate = false;
     if (traceHasDynamicMediaType) {
         const CMediaType &oldMediaType = m_pInput->CurrentMediaType();
         const bool alreadyHadPendingReconfigure = _isInputMediaTypeChanged || _needReloadScript;
-        traceMetadataOnlyFastPath = !alreadyHadPendingReconfigure &&
+        traceMetadataOnlyCandidate = !alreadyHadPendingReconfigure &&
             IsOnlyVideoInfo2ControlFlagsChanged(oldMediaType, *pmt);
         Environment::GetInstance().Log(
             L"DYNAMIC_MT_CLASSIFY metadata_only_bt709_candidate %d pending_reconfigure %d",
-            traceMetadataOnlyFastPath, alreadyHadPendingReconfigure);
+            traceMetadataOnlyCandidate, alreadyHadPendingReconfigure);
         REFERENCE_TIME traceSampleStart = 0;
         REFERENCE_TIME traceSampleStop = 0;
         const HRESULT traceTimeHr = pSample->GetTime(&traceSampleStart, &traceSampleStop);
@@ -235,19 +235,14 @@ receive_replacement = '''    // Sparse timing trace separates upstream inter-arr
         m_pInput->CurrentMediaType() = *pmt;'''
 s = s.replace(receive_anchor, receive_replacement, 1)
 
-# Set the existing format-change flag only for real layout changes. The narrow, exact
-# BT.709 SDR metadata-only case updates per-frame color props without resetting
-# the input prebuffer or reloading the VapourSynth script.
+# Keep upstream format-change behavior. Metadata-only classification is diagnostic
+# evidence only; every dynamic media-type change still uses normal reconfiguration.
 flag_anchor = '''        _inputVideoFormat = Format::GetVideoFormat(*pmt, &MainFrameServer::GetInstance());
         DeleteMediaType(pmt);
         _isInputMediaTypeChanged = true;'''
-flag_replacement = '''        _inputVideoFormat = Format::GetVideoFormat(*pmt, &MainFrameServer::GetInstance());
-        DeleteMediaType(pmt);
-        _isInputMediaTypeChanged = !traceMetadataOnlyFastPath;
-        if (traceMetadataOnlyFastPath) {
-            Environment::GetInstance().Log(
-                L"DYNAMIC_MT_FASTPATH applied metadata_only_control_flags old_control 00000000 new_control 2880A581 downstream_type_kept_existing 1");
-        }'''
+flag_replacement = '''        _inputVideoFormat = Format::GetVideoFormat(*pmt, &MainFrameServer::GetInstance())
+        DeleteMediaType(pmt)
+        _isInputMediaTypeChanged = true'''
 if s.count(flag_anchor) != 1:
     raise SystemExit("Could not uniquely locate input media-type reconfigure flag; refusing to patch")
 s = s.replace(flag_anchor, flag_replacement, 1)
