@@ -365,6 +365,91 @@ jobs:
               '                return dst;',
               "standard chroma phase end")
 
+          # Refine the loop timers: separate tile mask/vector processing from pixel interpolation.
+          old_luma_loop = '''                    for (auto &tile : d->maskResizerFull.tiles) {
+                        tile.Process(tmp.get(), bufMaskF, bufMaskB, bufSmallFX, bufSmallFY, bufSmallBX, bufSmallBY, bufSmallFFX, bufSmallFFY, bufSmallBBX, bufSmallBBY);
+
+                        FlowInterExtra<PixelType>(dstPtrY + tile.dstX * sizeof(PixelType) + tile.dstY * dstStrideY, dstStrideY,
+                             ref.GetLevel(0).planes[0], src.GetLevel(0).planes[0],
+                             dstTileXB.get(), dstTileXF.get(), dstTileYB.get(), dstTileYF.get(),
+                             dstTileMaskB.get(), dstTileMaskF.get(), MaskResizer::GetTileBufferStride(),
+                             tile.dstX, tile.dstY, tile.dstWidth, tile.dstHeight, time256,
+                             dstTileXBB.get(), dstTileXFF.get(), dstTileYBB.get(), dstTileYFF.get());
+                    }'''
+          new_luma_loop = '''                    int64_t diagMaskLumaUs = 0;
+                    int64_t diagInterLumaUs = 0;
+                    for (auto &tile : d->maskResizerFull.tiles) {
+                        auto diagInnerStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};
+                        tile.Process(tmp.get(), bufMaskF, bufMaskB, bufSmallFX, bufSmallFY, bufSmallBX, bufSmallBY, bufSmallFFX, bufSmallFFY, bufSmallBBX, bufSmallBBY);
+                        if (diagFlowTarget) diagMaskLumaUs += MvuFrameTimingDiag::ElapsedUs(diagInnerStart);
+
+                        diagInnerStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};
+                        FlowInterExtra<PixelType>(dstPtrY + tile.dstX * sizeof(PixelType) + tile.dstY * dstStrideY, dstStrideY,
+                             ref.GetLevel(0).planes[0], src.GetLevel(0).planes[0],
+                             dstTileXB.get(), dstTileXF.get(), dstTileYB.get(), dstTileYF.get(),
+                             dstTileMaskB.get(), dstTileMaskF.get(), MaskResizer::GetTileBufferStride(),
+                             tile.dstX, tile.dstY, tile.dstWidth, tile.dstHeight, time256,
+                             dstTileXBB.get(), dstTileXFF.get(), dstTileYBB.get(), dstTileYFF.get());
+                        if (diagFlowTarget) diagInterLumaUs += MvuFrameTimingDiag::ElapsedUs(diagInnerStart);
+                    }
+                    if (diagFlowTarget) {
+                        MvuFrameTimingDiag::LogPhase("mask_resize_luma", n, d->deltaFrame, diagMaskLumaUs);
+                        MvuFrameTimingDiag::LogPhase("interpolate_luma", n, d->deltaFrame, diagInterLumaUs);
+                    }'''
+          if s.count(old_luma_loop) != 1:
+              raise SystemExit(f"Could not uniquely locate extra-mask luma loop: {s.count(old_luma_loop)}")
+          s = s.replace(old_luma_loop, new_luma_loop, 1)
+
+          old_chroma_loop = '''                        for (auto &tile : (d->vi.format.subSamplingH > 0 || d->vi.format.subSamplingW > 0) ? d->maskResizerSubSampled.tiles : d->maskResizerFull.tiles) {
+                            tile.Process(tmp.get(), bufMaskF, bufMaskB, bufSmallFX, bufSmallFY, bufSmallBX, bufSmallBY, bufSmallFFX, bufSmallFFY, bufSmallBBX, bufSmallBBY);
+
+                            FlowInterExtra<PixelType>(dstPtrU + tile.dstX * sizeof(PixelType) + tile.dstY * dstStrideU, dstStrideU,
+                                 ref.GetLevel(0).planes[1], src.GetLevel(0).planes[1],
+                                 dstTileXB.get(), dstTileXF.get(), dstTileYB.get(), dstTileYF.get(),
+                                 dstTileMaskB.get(), dstTileMaskF.get(), MaskResizer::GetTileBufferStride(),
+                                 tile.dstX, tile.dstY, tile.dstWidth, tile.dstHeight, time256,
+                                 dstTileXBB.get(), dstTileXFF.get(), dstTileYBB.get(), dstTileYFF.get());
+
+                            FlowInterExtra<PixelType>(dstPtrV + tile.dstX * sizeof(PixelType) + tile.dstY * dstStrideV, dstStrideV,
+                                 ref.GetLevel(0).planes[2], src.GetLevel(0).planes[2],
+                                 dstTileXB.get(), dstTileXF.get(), dstTileYB.get(), dstTileYF.get(),
+                                 dstTileMaskB.get(), dstTileMaskF.get(), MaskResizer::GetTileBufferStride(),
+                                 tile.dstX, tile.dstY, tile.dstWidth, tile.dstHeight, time256,
+                                 dstTileXBB.get(), dstTileXFF.get(), dstTileYBB.get(), dstTileYFF.get());
+                        }'''
+          new_chroma_loop = '''                        int64_t diagMaskChromaUs = 0;
+                        int64_t diagInterChromaUs = 0;
+                        for (auto &tile : (d->vi.format.subSamplingH > 0 || d->vi.format.subSamplingW > 0) ? d->maskResizerSubSampled.tiles : d->maskResizerFull.tiles) {
+                            auto diagInnerStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};
+                            tile.Process(tmp.get(), bufMaskF, bufMaskB, bufSmallFX, bufSmallFY, bufSmallBX, bufSmallBY, bufSmallFFX, bufSmallFFY, bufSmallBBX, bufSmallBBY);
+                            if (diagFlowTarget) diagMaskChromaUs += MvuFrameTimingDiag::ElapsedUs(diagInnerStart);
+
+                            diagInnerStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};
+                            FlowInterExtra<PixelType>(dstPtrU + tile.dstX * sizeof(PixelType) + tile.dstY * dstStrideU, dstStrideU,
+                                 ref.GetLevel(0).planes[1], src.GetLevel(0).planes[1],
+                                 dstTileXB.get(), dstTileXF.get(), dstTileYB.get(), dstTileYF.get(),
+                                 dstTileMaskB.get(), dstTileMaskF.get(), MaskResizer::GetTileBufferStride(),
+                                 tile.dstX, tile.dstY, tile.dstWidth, tile.dstHeight, time256,
+                                 dstTileXBB.get(), dstTileXFF.get(), dstTileYBB.get(), dstTileYFF.get());
+
+                            FlowInterExtra<PixelType>(dstPtrV + tile.dstX * sizeof(PixelType) + tile.dstY * dstStrideV, dstStrideV,
+                                 ref.GetLevel(0).planes[2], src.GetLevel(0).planes[2],
+                                 dstTileXB.get(), dstTileXF.get(), dstTileYB.get(), dstTileYF.get(),
+                                 dstTileMaskB.get(), dstTileMaskF.get(), MaskResizer::GetTileBufferStride(),
+                                 tile.dstX, tile.dstY, tile.dstWidth, tile.dstHeight, time256,
+                                 dstTileXBB.get(), dstTileXFF.get(), dstTileYBB.get(), dstTileYFF.get());
+                            if (diagFlowTarget) diagInterChromaUs += MvuFrameTimingDiag::ElapsedUs(diagInnerStart);
+                        }
+                        if (diagFlowTarget) {
+                            MvuFrameTimingDiag::LogPhase("mask_resize_chroma", n, d->deltaFrame, diagMaskChromaUs);
+                            MvuFrameTimingDiag::LogPhase("interpolate_chroma_uv", n, d->deltaFrame, diagInterChromaUs);
+                        }'''
+          if s.count(old_chroma_loop) != 1:
+              raise SystemExit(f"Could not uniquely locate extra-mask chroma loop: {s.count(old_chroma_loop)}")
+          s = s.replace(old_chroma_loop, new_chroma_loop, 1)
+
+          print("Added per-frame timing split between tile.Process and FlowInterExtra for luma/chroma.")
+
           p.write_text(s, encoding="utf-8")
           print("Added FlowFPS internal phase timers for vectors, frame setup, masks, and luma/chroma loops.")
 
@@ -479,7 +564,7 @@ jobs:
           - Analyse detail: delta direction (+1/-1).
           - Super detail: instance ID, to distinguish multiple Super nodes.
           - FlowFPS detail: delta frame setting.
-          - FlowFPSPhase records: vectors_load, frame_setup, base_masks, tile_buffers, extra_vectors, extra_masks, and luma/chroma loop times.
+          - FlowFPSPhase records: vectors_load, frame_setup, base_masks, tile_buffers, extra_vectors, extra_masks, luma/chroma loop times, mask_resize_luma/chroma and interpolate_luma/chroma_uv.
 
           The file is process-specific and is initialized on the first diagnostic record. Restore the backed-up DLL after diagnosis.
           """
