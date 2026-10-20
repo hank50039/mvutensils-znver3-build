@@ -295,100 +295,11 @@ if s.count(add_anchor) != 1:
 s = s.replace(add_anchor, add_replacement, 1)
 filter_cpp.write_text(s, encoding="utf-8", newline="")
 
-# ---------- VapourSynth Filter: retain the proven 28-frame request cap ----------
-s = frame_cpp.read_text(encoding="utf-8-sig")
-ns = "namespace SynthFilter {\n\n"
-if s.count(ns) != 1:
-    raise SystemExit("Could not uniquely locate SynthFilter namespace in frame_handler.cpp")
-s = s.replace(ns, ns + "namespace {\nconstexpr size_t MAX_PENDING_OUTPUT_FRAMES = 28;\n}\n\n", 1)
+# ---------- VapourSynth: do not patch frame request/delivery flow ----------
+# Preserve upstream frame_handler.cpp and frame_handler.h byte-for-byte.
+# Previous diagnostic variants changed the async output-request loop (CAP28); this
+# variant deliberately leaves queueing, callback handling, delivery, and reset logic
+# untouched so the media-type/Receive diagnostics cannot disable interpolation.
+print("VapourSynth frame request/delivery path left unchanged from upstream.")
 
-request_anchor = '''    while (_nextOutputFrameNb <= maxRequestOutputFrameNb) {
-        // before every async request to a frame, we need to keep track of the request so that when flushing we can wait for
-        // any pending request to finish before destroying the script
-
-        {
-            const std::unique_lock uniqueOutputLock(_outputMutex);
-
-            _outputFrames.emplace(_nextOutputFrameNb, nullptr);
-        }
-        AVSF_VPS_API->getFrameAsync(_nextOutputFrameNb, MainFrameServer::GetInstance().GetScriptClip(), VpsGetFrameCallback, this);'''
-request_replacement = '''    while (_nextOutputFrameNb <= maxRequestOutputFrameNb) {
-        // Keep asynchronous requests bounded; the proven PotPlayer 4K baseline uses 28 pending outputs.
-        {
-            const std::unique_lock uniqueOutputLock(_outputMutex);
-            if (_outputFrames.size() >= MAX_PENDING_OUTPUT_FRAMES) {
-                break;
-            }
-            _outputFrames.emplace(_nextOutputFrameNb, nullptr);
-        }
-        AVSF_VPS_API->getFrameAsync(_nextOutputFrameNb, MainFrameServer::GetInstance().GetScriptClip(), VpsGetFrameCallback, this);'''
-if s.count(request_anchor) != 1:
-    raise SystemExit("Could not uniquely locate async output request loop; refusing to patch")
-s = s.replace(request_anchor, request_replacement, 1)
-
-callback_anchor = '''    FrameHandler *frameHandler = static_cast<FrameHandler *>(userData);
-    Environment::GetInstance().Log(L"Output frame %6d is ready, output queue size %2zd", n, frameHandler->_outputFrames.size());'''
-callback_replacement = '''    FrameHandler *frameHandler = static_cast<FrameHandler *>(userData);
-    size_t outputQueueSize = 0;
-    {
-        const std::shared_lock sharedOutputLock(frameHandler->_outputMutex);
-        outputQueueSize = frameHandler->_outputFrames.size();
-    }
-    Environment::GetInstance().Log(L"Output frame %6d is ready, output queue size %2zd", n, outputQueueSize);'''
-if s.count(callback_anchor) != 1:
-    raise SystemExit("Could not uniquely locate async callback queue-size log; refusing to patch")
-s = s.replace(callback_anchor, callback_replacement, 1)
-frame_cpp.write_text(s, encoding="utf-8", newline="")
-
-# ---------- Low-overhead CAP-28 start-position markers ----------
-# Do not instrument the per-frame delivery path. The upstream filter's existing
-# ready/startTime/deliver log records are enough for offline timing correlation.
-header_path = root / "vapoursynth_filter/src/frame_handler.h"
-replace_once(
-    header_path,
-    "    std::map<int, AutoReleaseVSFrame> _outputFrames;\n",
-    "    std::map<int, AutoReleaseVSFrame> _outputFrames;\n"
-    "    // One sparse diagnostic marker per queue-throttle/reset event.\n"
-    "    bool _outputRequestThrottleLogged = false;\n",
-    "sparse CAP-28 diagnostic member",
-)
-
-s = frame_cpp.read_text(encoding="utf-8-sig")
-
-def sparse_replace_once(source: str, old: str, new: str, label: str) -> str:
-    count = source.count(old)
-    if count != 1:
-        raise SystemExit(f"{label}: expected exactly one match, got {count}; refusing to patch")
-    return source.replace(old, new, 1)
-
-s = sparse_replace_once(
-    s,
-    '''            if (_outputFrames.size() >= MAX_PENDING_OUTPUT_FRAMES) {
-                break;
-            }''',
-    '''            if (_outputFrames.size() >= MAX_PENDING_OUTPUT_FRAMES) {
-                if (!_outputRequestThrottleLogged) {
-                    Environment::GetInstance().Log(
-                        L"CAP28DIAG_THROTTLE next_output %d max_request %d process_source %d queued %zu",
-                        _nextOutputFrameNb, maxRequestOutputFrameNb, processSourceFrameIters[0]->first,
-                        _outputFrames.size());
-                    _outputRequestThrottleLogged = true;
-                }
-                break;
-            }''',
-    "log only the first cap-28 throttle event per reset",
-)
-
-s = sparse_replace_once(
-    s,
-    "    _lastUsedSourceFrameNb = 0;\n",
-    "    _lastUsedSourceFrameNb = 0;\n"
-    "    _outputRequestThrottleLogged = false;\n"
-    "    Environment::GetInstance().Log(L\"CAP28DIAG_RESET local_frame_indices_reset 1\");\n",
-    "log reset and re-arm sparse throttle marker",
-)
-
-frame_cpp.write_text(s, encoding="utf-8", newline="")
-
-print("Patched shared media-type diagnostics and sparse Receive timing.")
-print("Patched VapourSynth output queue cap at 28, with synchronized queue-size logging.")
+print("Patched shared media-type diagnostics and sparse Receive timing only.")
