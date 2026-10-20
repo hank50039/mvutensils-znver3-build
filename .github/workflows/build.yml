@@ -2,7 +2,7 @@ name: Build verified Zen 3 AVX2 tuning
 
 on:
   push:
-    branches: [main]
+    branches: [main, mvu-frame-stage-diag-20261020]
   workflow_dispatch:
 
 permissions:
@@ -43,6 +43,171 @@ jobs:
           echo "UPSTREAM_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           git log -1 --oneline
 
+      - name: Instrument targeted MVUtensils frame stages
+        run: |
+          cd upstream
+          python - <<'PY'
+          from pathlib import Path
+
+          helper = r'''
+          #pragma once
+          #ifndef NOMINMAX
+          #define NOMINMAX
+          #endif
+          #include <windows.h>
+          #include <atomic>
+          #include <chrono>
+          #include <cstdint>
+          #include <cstdio>
+          #include <cstring>
+          #include <new>
+          #include <string>
+
+          namespace MvuFrameTimingDiag {
+          using Clock = std::chrono::steady_clock;
+
+          struct RequestStamp {
+              Clock::time_point requested;
+              int detail;
+          };
+
+          inline bool IsTarget(const char *stage, int n) noexcept {
+              if (std::strcmp(stage, "FlowFPS") == 0)
+                  return n >= 2180 && n <= 2280;
+              if (std::strcmp(stage, "Analyse") == 0 || std::strcmp(stage, "Super") == 0)
+                  return n >= 1430 && n <= 1530;
+              return false;
+          }
+
+          inline int NewInstanceId() noexcept {
+              static std::atomic<int> next{1};
+              return next.fetch_add(1, std::memory_order_relaxed);
+          }
+
+          inline HANDLE LogHandle() noexcept {
+              static HANDLE handle = []() noexcept {
+                  wchar_t temp[MAX_PATH + 1]{};
+                  const DWORD length = GetTempPathW(MAX_PATH, temp);
+                  if (length == 0 || length >= MAX_PATH)
+                      return INVALID_HANDLE_VALUE;
+                  std::wstring path(temp, length);
+                  path += L"MVUtensils_FrameTimingDiag_";
+                  path += std::to_wstring(GetCurrentProcessId());
+                  path += L".txt";
+                  return CreateFileW(path.c_str(), FILE_APPEND_DATA,
+                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                      nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+              }();
+              return handle;
+          }
+
+          inline void Log(const char *stage, int n, int detail,
+                          int64_t waitUs, int64_t workUs) noexcept {
+              char line[256];
+              const auto tNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  Clock::now().time_since_epoch()).count();
+              const int length = std::snprintf(line, sizeof(line),
+                  "t_ns=%lld stage=%s frame=%d detail=%d wait_us=%lld work_us=%lld\r\n",
+                  static_cast<long long>(tNs), stage, n, detail,
+                  static_cast<long long>(waitUs), static_cast<long long>(workUs));
+              HANDLE handle = LogHandle();
+              if (handle == INVALID_HANDLE_VALUE || length <= 0)
+                  return;
+              const DWORD bytes = static_cast<DWORD>(
+                  length < static_cast<int>(sizeof(line) - 1) ? length : sizeof(line) - 1);
+              DWORD written = 0;
+              WriteFile(handle, line, bytes, &written, nullptr);
+          }
+
+          inline void Begin(const char *stage, int n, void **frameData, int detail = 0) noexcept {
+              if (!frameData || !IsTarget(stage, n))
+                  return;
+              *frameData = new (std::nothrow) RequestStamp{Clock::now(), detail};
+          }
+
+          class Scope {
+              const char *stage_;
+              int n_;
+              int detail_;
+              bool enabled_;
+              RequestStamp *stamp_;
+              Clock::time_point workStart_;
+              int64_t waitUs_;
+
+          public:
+              Scope(const char *stage, int n, void **frameData, int detail = 0) noexcept
+                  : stage_(stage), n_(n), detail_(detail),
+                    enabled_(IsTarget(stage, n)), stamp_(nullptr),
+                    workStart_(Clock::now()), waitUs_(-1) {
+                  if (!enabled_)
+                      return;
+                  if (frameData && *frameData) {
+                      stamp_ = static_cast<RequestStamp *>(*frameData);
+                      *frameData = nullptr;
+                      waitUs_ = std::chrono::duration_cast<std::chrono::microseconds>(
+                          workStart_ - stamp_->requested).count();
+                      if (detail_ == 0)
+                          detail_ = stamp_->detail;
+                  }
+              }
+
+              ~Scope() noexcept {
+                  if (!enabled_)
+                      return;
+                  const int64_t workUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                      Clock::now() - workStart_).count();
+                  Log(stage_, n_, detail_, waitUs_, workUs);
+                  delete stamp_;
+              }
+
+              Scope(const Scope &) = delete;
+              Scope &operator=(const Scope &) = delete;
+          };
+          }
+          '''
+
+          header = Path("src/FrameTimingDiag.h")
+          if header.exists():
+              raise SystemExit("Refusing to overwrite an existing FrameTimingDiag.h in upstream source.")
+          header.write_text(helper, encoding="utf-8")
+
+          configs = [
+              ("src/Analyse.cpp", "Analyse", "d->deltaFrame", None),
+              ("src/Super.cpp", "Super", "d->diagId", "super"),
+              ("src/FlowFPS.cpp", "FlowFPS", "d->deltaFrame", None),
+          ]
+
+          for filename, stage, detail, special in configs:
+              p = Path(filename)
+              s = p.read_text(encoding="utf-8")
+              if s.count('#include "Common.h"') != 1:
+                  raise SystemExit(f"Could not uniquely locate Common.h include in {filename}")
+              s = s.replace('#include "Common.h"', '#include "Common.h"\n#include "FrameTimingDiag.h"', 1)
+
+              old_sig = "[[maybe_unused]] void **frameData"
+              if s.count(old_sig) != 1:
+                  raise SystemExit(f"Could not uniquely locate frameData parameter in {filename}")
+              s = s.replace(old_sig, "void **frameData", 1)
+
+              initial = "if (activationReason == arInitial) {"
+              ready = "} else if (activationReason == arAllFramesReady) {"
+              if s.count(initial) != 1 or s.count(ready) != 1:
+                  raise SystemExit(f"Could not uniquely locate frame activation branches in {filename}")
+
+              if special == "super":
+                  struct_marker = "struct SuperData {\n"
+                  if s.count(struct_marker) != 1:
+                      raise SystemExit("Could not uniquely locate SuperData.")
+                  s = s.replace(struct_marker, struct_marker + "    int diagId = MvuFrameTimingDiag::NewInstanceId();\n", 1)
+
+              s = s.replace(initial, initial + f'\n        MvuFrameTimingDiag::Begin("{stage}", n, frameData, {detail});', 1)
+              s = s.replace(ready, ready + f'\n        MvuFrameTimingDiag::Scope stageDiag("{stage}", n, frameData, {detail});', 1)
+              p.write_text(s, encoding="utf-8")
+              print(f"Instrumented {filename} for {stage} frame timing.")
+
+          print("Diagnostic windows: Analyse/Super frames 1430-1530; FlowFPS frames 2180-2280.")
+          PY
+
       - name: Apply and commit Zen 3 tuning to AVX2 build variant only
         run: |
           cd upstream
@@ -57,8 +222,8 @@ jobs:
           p.write_text(s.replace(old, new), encoding="utf-8")
           print("Patched AVX2 variant: -march=x86-64-v3 -mtune=znver3")
           PY
-          git add meson.build
-          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Apply Zen 3 tuning to AVX2 build variant"
+          git add meson.build src/FrameTimingDiag.h src/Analyse.cpp src/Super.cpp src/FlowFPS.cpp
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Add targeted frame-stage timing diagnostics and Zen 3 tuning"
           echo "PATCHED_SOURCE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           git show --stat --oneline HEAD
 
@@ -118,6 +283,50 @@ jobs:
           rm *.whl
           strip $(find unpacked -name '*.dll')
           wheel pack unpacked/*
+
+
+      - name: Package targeted diagnostic DLL
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          root = Path("dist")
+          dlls = list((root / "unpacked").rglob("mvutensils.avx2.dll"))
+          if len(dlls) != 1:
+              raise SystemExit(f"Expected one instrumented AVX2 DLL in unpacked wheel; found {len(dlls)}")
+
+          readme = """MVUtensils targeted frame-stage timing diagnostic build
+          Build purpose: isolate the delayed frame readiness seen near output frames 2221 and 2249.
+          This is an experimental diagnostic DLL, not a normal release.
+
+          Installation:
+          1. Back up the currently installed mvutensils.avx2.dll.
+          2. Replace only that AVX2 DLL with the one in this archive. Keep the other installed MVUtensils files unchanged.
+          3. Reproduce the same PotPlayer playback and allow it to pass media times around 24.69 s and 25.00 s.
+          4. Close PotPlayer and find %TEMP%\\MVUtensils_FrameTimingDiag_<PID>.txt, then share that log.
+
+          Recorded frame windows:
+          - Analyse and Super: frames 1430 through 1530.
+          - FlowFPS: frames 2180 through 2280.
+
+          Log fields:
+          - wait_us: elapsed wall time from VapourSynth's arInitial request until arAllFramesReady, including waiting for dependent clips/frames.
+          - work_us: elapsed wall time inside the filter's arAllFramesReady processing.
+          - Analyse detail: delta direction (+1/-1).
+          - Super detail: instance ID, to distinguish multiple Super nodes.
+          - FlowFPS detail: delta frame setting.
+
+          The file is process-specific and is initialized on the first diagnostic record. Restore the backed-up DLL after diagnosis.
+          """
+          readme = "\\n".join(line.strip() for line in readme.splitlines()).strip() + "\\n"
+
+          out = root / "MVUtensils-FrameTimingDiag-AVX2.zip"
+          with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as z:
+              z.write(dlls[0], "mvutensils.avx2.dll")
+              z.writestr("README.txt", readme)
+          print(f"Packaged {dlls[0]} as {out} ({out.stat().st_size:,} bytes).")
+          PY
 
       - name: Upload verified Windows build artifact
         uses: actions/upload-artifact@v7
