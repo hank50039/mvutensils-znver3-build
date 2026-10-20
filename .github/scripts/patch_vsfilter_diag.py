@@ -295,7 +295,7 @@ if s.count(add_anchor) != 1:
 s = s.replace(add_anchor, add_replacement, 1)
 filter_cpp.write_text(s, encoding="utf-8", newline="")
 
-# ---------- VapourSynth Filter: retain CAP28 with sparse diagnostic markers ----------
+# ---------- VapourSynth Filter: retain the tested CAP28 request bound ----------
 s = frame_cpp.read_text(encoding="utf-8-sig")
 ns = "namespace SynthFilter {\n\n"
 if s.count(ns) != 1:
@@ -325,32 +325,5 @@ request_replacement = '''    while (_nextOutputFrameNb <= maxRequestOutputFrameN
 if s.count(request_anchor) != 1:
     raise SystemExit("Could not uniquely locate async output request loop; refusing to patch")
 s = s.replace(request_anchor, request_replacement, 1)
-
-header_path = root / "vapoursynth_filter/src/frame_handler.h"
-replace_once(
-    header_path,
-    "    std::map<int, AutoReleaseVSFrame> _outputFrames;\\n",
-    "    std::map<int, AutoReleaseVSFrame> _outputFrames;\\n"
-    "    bool _outputRequestThrottleLogged = false;\\n",
-    "sparse CAP28 diagnostic member",
-)
-
-reset_anchor = "    _lastUsedSourceFrameNb = 0;\\n"
-reset_replacement = "    _lastUsedSourceFrameNb = 0;\\n    _outputRequestThrottleLogged = false;\\n    Environment::GetInstance().Log(L\\\"CAP28DIAG_RESET local_frame_indices_reset 1\\\");\\n"
-replace_once(frame_cpp, reset_anchor, reset_replacement, "sparse reset marker")
-
-throttle_anchor = '''            if (_outputFrames.size() >= MAX_PENDING_OUTPUT_FRAMES) {
-                break;
-            }'''
-throttle_replacement = '''            if (_outputFrames.size() >= MAX_PENDING_OUTPUT_FRAMES) {
-                if (!_outputRequestThrottleLogged) {
-                    Environment::GetInstance().Log(
-                        L"CAP28DIAG_THROTTLE next_output %d max_request %d queued %zu",
-                        _nextOutputFrameNb, maxRequestOutputFrameNb, _outputFrames.size());
-                    _outputRequestThrottleLogged = true;
-                }
-                break;
-            }'''
-# The throttle anchor exists in the just-patched request loop; replace exactly once.
-replace_once(frame_cpp, throttle_anchor, throttle_replacement, "sparse throttle marker")
-print("Patched CAP28 queue cap and sparse reset/throttle markers; output delivery path unchanged.")
+frame_cpp.write_text(s, encoding="utf-8", newline="")
+print("Patched CAP28 request bound; callback and delivery path left unchanged.")
