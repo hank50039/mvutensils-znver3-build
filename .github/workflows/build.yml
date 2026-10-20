@@ -294,7 +294,8 @@ jobs:
               '                if (d->extraMask && vectorsBB.IsUsable(d->thscd1, d->thscd2) && vectorsFF.IsUsable(d->thscd1, d->thscd2)) {',
               '                MotionBlockPyramid vectorsBB(d->extraMask ? vsapi->getFrameFilter(nright, d->mvbw, frameCtx) : nullptr, 1, d->prefix, vsapi, d->mvbwGeometry);\n'
               '                const bool diagExtraVectorsUsable = d->extraMask && vectorsBB.IsUsable(d->thscd1, d->thscd2) && vectorsFF.IsUsable(d->thscd1, d->thscd2);\n'
-              '                if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("extra_vectors", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n\n'
+              '                if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("extra_vectors", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n'
+              '                diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n\n'
               '                if (diagExtraVectorsUsable) {',
               "extra vectors phase")
 
@@ -308,8 +309,12 @@ jobs:
               "extra masks phase")
 
           replace_once(
+              '                              dstTileXBB.get(), dstTileXFF.get(), dstTileYBB.get(), dstTileYFF.get());\n'
+              '                    }\n\n'
               '                    if (d->vi.format.numPlanes == 3) {\n'
               '                        SmallF->AdjustSmallVectorMaskSubSampling(vectorsF.nBlkX, vectorsF.nBlkY, d->vi.format.subSamplingW, d->vi.format.subSamplingH);',
+              '                              dstTileXBB.get(), dstTileXFF.get(), dstTileYBB.get(), dstTileYFF.get());\n'
+              '                    }\n'
               '                    if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("luma_loop_extra", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n\n'
               '                    if (d->vi.format.numPlanes == 3) {\n'
               '                        diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
