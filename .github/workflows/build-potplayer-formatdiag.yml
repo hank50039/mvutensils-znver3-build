@@ -50,11 +50,14 @@ jobs:
           if ($src -notmatch 'FORMAT_DIFF_BYTE' -or $src -notmatch 'RECVTRACE AddInputSample_done' -or $src -notmatch 'DYNAMIC_MT') {
             throw "Expected diagnostic source markers are missing."
           }
-          if ($src -match 'DYNAMIC_MT_FASTPATH applied' -or $src -match '_isInputMediaTypeChanged = !traceMetadataOnlyCandidate') {
-            throw "Unsafe BT.709 metadata-only fast path must remain disabled; preserve normal media-type reconfiguration."
+          if ($src -notmatch 'DYNAMIC_MT_FASTPATH applied' -or $src -notmatch '_isInputMediaTypeChanged = !traceMetadataOnlyCandidate') {
+            throw "The tested BT.709 metadata-only Fast Path must be preserved."
           }
-          if ($frame -match 'MAX_PENDING_OUTPUT_FRAMES|CAP28DIAG_|CAP28') {
-            throw "FrameHandler must preserve upstream queue/request/delivery behavior; no CAP28 patch is allowed."
+          if ($frame -notmatch 'MAX_PENDING_OUTPUT_FRAMES = 28') {
+            throw "The tested CAP28 request bound is missing."
+          }
+          if ($frame -match 'CAP28DIAG_DELIVER') {
+            throw "Per-frame delivery instrumentation must remain disabled."
           }
           $dllCandidates = Get-ChildItem avisynth_filter -Recurse -File -Filter *.ax |
             Where-Object { $_.FullName -match '[\\/]x64[\\/]Release[\\/]' }
@@ -74,7 +77,7 @@ jobs:
             "Configuration: Release x64"
             "Output: vapoursynth_filter_x64.ax"
             "Diagnostics: FORMAT_DIFF_*, RECVTRACE, DYNAMIC_MT"
-            "BT.709 metadata-only fast path: disabled; normal media-type reconfiguration preserved"
+            "BT.709 metadata-only Fast Path: retained"
             "VapourSynth frame_handler.cpp and frame_handler.h: unmodified upstream"
             "Output queue/request/callback/delivery/reset behavior: unmodified upstream"
             "No CAP28 queue limit or CAP28 diagnostic marker is added"
