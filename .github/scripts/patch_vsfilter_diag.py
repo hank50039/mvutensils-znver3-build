@@ -345,244 +345,55 @@ if s.count(callback_anchor) != 1:
 s = s.replace(callback_anchor, callback_replacement, 1)
 frame_cpp.write_text(s, encoding="utf-8", newline="")
 
-# ---------- CAP-28 request/readiness/delivery timing for start-position comparison ----------
-# Keep the existing BT.709 metadata-only fast path and cap of 28 unchanged.
-# The added clocks are diagnostic only and let paired logs be aligned by media timestamp.
+# ---------- Low-overhead CAP-28 start-position markers ----------
+# Do not instrument the per-frame delivery path. The upstream filter's existing
+# ready/startTime/deliver log records are enough for offline timing correlation.
 header_path = root / "vapoursynth_filter/src/frame_handler.h"
-replace_once(
-    header_path,
-    "#pragma once\n",
-    "#pragma once\n\n#include <chrono>\n#include <map>\n",
-    "start-point diagnostic header includes",
-)
 replace_once(
     header_path,
     "    std::map<int, AutoReleaseVSFrame> _outputFrames;\n",
     "    std::map<int, AutoReleaseVSFrame> _outputFrames;\n"
-    "    // Diagnostic-only timestamps; protected by _outputMutex.\n"
-    "    std::map<int, std::chrono::steady_clock::time_point> _outputRequestTimes;\n"
-    "    std::map<int, std::chrono::steady_clock::time_point> _outputReadyTimes;\n"
-    "    std::chrono::steady_clock::time_point _diagResetTime = std::chrono::steady_clock::now();\n"
+    "    // One sparse diagnostic marker per queue-throttle/reset event.\n"
     "    bool _outputRequestThrottleLogged = false;\n",
-    "start-point diagnostic timing members",
+    "sparse CAP-28 diagnostic member",
 )
 
 s = frame_cpp.read_text(encoding="utf-8-sig")
 
-def diag_replace_once(source: str, old: str, new: str, label: str) -> str:
+def sparse_replace_once(source: str, old: str, new: str, label: str) -> str:
     count = source.count(old)
     if count != 1:
         raise SystemExit(f"{label}: expected exactly one match, got {count}; refusing to patch")
     return source.replace(old, new, 1)
 
-# Explicit standard headers for the new diagnostic-only timing maps and optional interval.
-s = diag_replace_once(
-    s,
-    '#include "frame_handler.h"\n\n',
-    '#include "frame_handler.h"\n\n#include <chrono>\n#include <optional>\n#include <ranges>\n\n',
-    "start-point diagnostic includes",
-)
-
-s = diag_replace_once(
+s = sparse_replace_once(
     s,
     '''            if (_outputFrames.size() >= MAX_PENDING_OUTPUT_FRAMES) {
                 break;
             }''',
     '''            if (_outputFrames.size() >= MAX_PENDING_OUTPUT_FRAMES) {
                 if (!_outputRequestThrottleLogged) {
-                    const auto capEventNow = std::chrono::steady_clock::now();
-                    const long long sinceResetUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                        capEventNow - _diagResetTime).count();
                     Environment::GetInstance().Log(
-                        L"CAP28DIAG_THROTTLE next_output %d max_request %d process_source %d input_media_start_ticks %lld queued %zu since_reset_us %lld",
+                        L"CAP28DIAG_THROTTLE next_output %d max_request %d process_source %d queued %zu",
                         _nextOutputFrameNb, maxRequestOutputFrameNb, processSourceFrameIters[0]->first,
-                        static_cast<long long>(inputSampleStartTime), _outputFrames.size(), sinceResetUs);
+                        _outputFrames.size());
                     _outputRequestThrottleLogged = true;
                 }
                 break;
             }''',
-    "record first cap-28 throttle per reset",
+    "log only the first cap-28 throttle event per reset",
 )
 
-s = diag_replace_once(
-    s,
-    "            _outputFrames.emplace(_nextOutputFrameNb, nullptr);\n",
-    "            _outputFrames.emplace(_nextOutputFrameNb, nullptr);\n"
-    "            _outputRequestTimes[_nextOutputFrameNb] = std::chrono::steady_clock::now();\n",
-    "record output request clock",
-)
-
-s = diag_replace_once(
-    s,
-    "            frameHandler->_outputFrames.erase(n);\n",
-    "            frameHandler->_outputFrames.erase(n);\n"
-    "            frameHandler->_outputRequestTimes.erase(n);\n"
-    "            frameHandler->_outputReadyTimes.erase(n);\n",
-    "clear request and ready clocks when callback arrives during flush",
-)
-
-s = diag_replace_once(
-    s,
-    "            frameHandler->_outputFrames[n] = const_cast<VSFrame *>(f);\n",
-    "            frameHandler->_outputFrames[n] = const_cast<VSFrame *>(f);\n"
-    "            frameHandler->_outputReadyTimes[n] = std::chrono::steady_clock::now();\n",
-    "record output-ready clock",
-)
-
-s = diag_replace_once(
-    s,
-    "    _outputFrames.clear();\n",
-    "    _outputFrames.clear();\n"
-    "    _outputRequestTimes.clear();\n"
-    "    _outputReadyTimes.clear();\n",
-    "clear frame timing maps at EndFlush",
-)
-
-s = diag_replace_once(
+s = sparse_replace_once(
     s,
     "    _lastUsedSourceFrameNb = 0;\n",
     "    _lastUsedSourceFrameNb = 0;\n"
     "    _outputRequestThrottleLogged = false;\n"
-    "    _diagResetTime = std::chrono::steady_clock::now();\n"
     "    Environment::GetInstance().Log(L\"CAP28DIAG_RESET local_frame_indices_reset 1\");\n",
-    "tag each new filter input epoch",
+    "log reset and re-arm sparse throttle marker",
 )
 
-s = diag_replace_once(
-    s,
-    "auto FrameHandler::WorkerProc() -> void {\n    const auto ResetOutput = [this]() -> void {",
-    "auto FrameHandler::WorkerProc() -> void {\n"
-    "    std::optional<std::chrono::steady_clock::time_point> lastDeliveryStartTime;\n"
-    "    const auto ResetOutput = [this, &lastDeliveryStartTime]() -> void {",
-    "track inter-delivery intervals",
-)
-
-s = diag_replace_once(
-    s,
-    "        _frameRateCheckpointDeliveryFrameNb = 0;\n        _currentDeliveryFrameRate = 0;\n    };",
-    "        _frameRateCheckpointDeliveryFrameNb = 0;\n"
-    "        _currentDeliveryFrameRate = 0;\n"
-    "        lastDeliveryStartTime.reset();\n"
-    "    };",
-    "reset inter-delivery interval tracker",
-)
-
-wait_start = "        decltype(_outputFrames)::iterator iter;"
-wait_end = "\n\n        if (_isFlushing) {\n            continue;\n        }"
-if s.count(wait_start) != 1:
-    raise SystemExit("start-point timing: expected one worker output wait block")
-start_index = s.find(wait_start)
-end_index = s.find(wait_end, start_index + len(wait_start))
-if end_index < 0:
-    raise SystemExit("start-point timing: worker wait block end marker not found")
-wait_block = '''        decltype(_outputFrames)::iterator iter;
-        long long requestToWorkerUs = -1;
-        long long readyToWorkerUs = -1;
-        long long requestToReadyUs = -1;
-        std::size_t queueDepthAtWake = 0;
-        std::size_t readyBacklogAtWake = 0;
-        {
-            std::shared_lock sharedOutputLock(_outputMutex);
-
-            _deliverSampleCv.wait(sharedOutputLock, [this, &iter]() -> bool {
-                if (_isFlushing) {
-                    return true;
-                }
-
-                iter = _outputFrames.find(_nextDeliveryFrameNb);
-                if (iter == _outputFrames.end()) {
-                    return false;
-                }
-
-                return iter->second.frame != nullptr;
-            });
-
-            if (!_isFlushing) {
-                const auto workerWakeTime = std::chrono::steady_clock::now();
-                queueDepthAtWake = _outputFrames.size();
-                readyBacklogAtWake = static_cast<std::size_t>(std::ranges::count_if(
-                    _outputFrames | std::views::values,
-                    [](const AutoReleaseVSFrame &frame) { return frame.frame != nullptr; }));
-
-                if (const auto requestIter = _outputRequestTimes.find(iter->first);
-                    requestIter != _outputRequestTimes.end()) {
-                    requestToWorkerUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                        workerWakeTime - requestIter->second).count();
-                }
-
-                if (const auto readyIter = _outputReadyTimes.find(iter->first);
-                    readyIter != _outputReadyTimes.end()) {
-                    readyToWorkerUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                        workerWakeTime - readyIter->second).count();
-                }
-
-                if (requestToWorkerUs >= 0 && readyToWorkerUs >= 0) {
-                    requestToReadyUs = requestToWorkerUs - readyToWorkerUs;
-                }
-            }
-        }'''
-s = s[:start_index] + wait_block + s[end_index:]
-
-delivery_start = "        if (ATL::CComPtr<IMediaSample> outSample; PrepareOutputSample("
-delivery_end = "\n        GarbageCollect(sourceFrameNb - 1);"
-if s.count(delivery_start) != 1:
-    raise SystemExit("start-point timing: expected one output delivery block")
-start_index = s.find(delivery_start)
-end_index = s.find(delivery_end, start_index + len(delivery_start))
-if end_index < 0:
-    raise SystemExit("start-point timing: output delivery block end marker not found")
-delivery_block = '''        const auto prepareStartTime = std::chrono::steady_clock::now();
-        ATL::CComPtr<IMediaSample> outSample;
-        if (PrepareOutputSample(outSample, iter->first, iter->second.frame, sourceFrameNb)) {
-            const auto deliveryStartTime = std::chrono::steady_clock::now();
-            const long long prepareUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                deliveryStartTime - prepareStartTime).count();
-
-            long long deliveryCallGapUs = -1;
-            if (lastDeliveryStartTime.has_value()) {
-                deliveryCallGapUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                    deliveryStartTime - *lastDeliveryStartTime).count();
-            }
-            lastDeliveryStartTime = deliveryStartTime;
-
-            const long long sinceResetUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                deliveryStartTime - _diagResetTime).count();
-
-            _filter.m_pOutput->Deliver(outSample);
-            const auto deliveryEndTime = std::chrono::steady_clock::now();
-            const long long downstreamDeliverUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                deliveryEndTime - deliveryStartTime).count();
-
-            RefreshDeliveryFrameRates(iter->first);
-
-            Environment::GetInstance().Log(
-                L"CAP28DIAG_DELIVER frame %d source_frame %d req_to_ready_us %lld ready_to_worker_us %lld req_to_worker_us %lld pending %zu ready_pending %zu prepare_us %lld downstream_deliver_us %lld deliver_call_gap_us %lld since_reset_us %lld",
-                iter->first, sourceFrameNb, requestToReadyUs, readyToWorkerUs, requestToWorkerUs,
-                queueDepthAtWake, readyBacklogAtWake, prepareUs, downstreamDeliverUs,
-                deliveryCallGapUs, sinceResetUs);
-            Environment::GetInstance().Log(L"Deliver output sample %6d from source frame %6d", iter->first, sourceFrameNb);
-        } else {
-            const long long prepareUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - prepareStartTime).count();
-            Environment::GetInstance().Log(
-                L"CAP28DIAG_PREPARE_FAILED frame %d req_to_ready_us %lld ready_to_worker_us %lld req_to_worker_us %lld pending %zu ready_pending %zu prepare_us %lld",
-                iter->first, requestToReadyUs, readyToWorkerUs, requestToWorkerUs,
-                queueDepthAtWake, readyBacklogAtWake, prepareUs);
-        }
-
-        const int completedFrameNb = iter->first;
-        {
-            const std::unique_lock uniqueOutputLock(_outputMutex);
-
-            _outputFrames.erase(iter);
-            _outputRequestTimes.erase(completedFrameNb);
-            _outputReadyTimes.erase(completedFrameNb);
-        }
-'''
-s = s[:start_index] + delivery_block + s[end_index:]
 frame_cpp.write_text(s, encoding="utf-8", newline="")
-
-print("Added CAP28 per-frame request/readiness/worker/delivery timing without changing the queue cap or BT.709 fast path.")
 
 print("Patched shared media-type diagnostics and sparse Receive timing.")
 print("Patched VapourSynth output queue cap at 28, with synchronized queue-size logging.")
