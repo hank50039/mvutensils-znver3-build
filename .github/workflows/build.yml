@@ -1,8 +1,8 @@
-name: Build verified Zen 3 AVX2 tuning
+name: Build verified Zen 3 AVX2 tuning - TileSize 128 benchmark
 
 on:
   push:
-    branches: [main, mvu-frame-stage-diag-20261020]
+    branches: [main, mvu-frame-stage-diag-20261020, mvu-tile128-bench-20261020]
   workflow_dispatch:
 
 permissions:
@@ -481,8 +481,19 @@ jobs:
           p.write_text(s.replace(old, new), encoding="utf-8")
           print("Patched AVX2 variant: -march=x86-64-v3 -mtune=znver3")
           PY
-          git add meson.build src/FrameTimingDiag.h src/Analyse.cpp src/Super.cpp src/FlowFPS.cpp
-          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Add targeted frame-stage timing diagnostics and Zen 3 tuning"
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("src/MaskResize.h")
+          s = p.read_text(encoding="utf-8")
+          old = "constexpr static int TileSize = 64;"
+          new = "constexpr static int TileSize = 128;"
+          if s.count(old) != 1:
+              raise SystemExit("Could not uniquely locate MaskResizer tile size; refusing to patch.")
+          p.write_text(s.replace(old, new, 1), encoding="utf-8")
+          print("Patched benchmark tile size: 128x128 (64x64 baseline).")
+          PY
+          git add meson.build src/MaskResize.h src/FrameTimingDiag.h src/Analyse.cpp src/Super.cpp src/FlowFPS.cpp
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Add frame-stage diagnostics, Zen 3 tuning, and 128x128 tiling experiment"
           echo "PATCHED_SOURCE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           git show --stat --oneline HEAD
 
@@ -557,6 +568,7 @@ jobs:
 
           readme = """MVUtensils targeted frame-stage timing diagnostic build
           Build purpose: isolate the delayed frame readiness seen near output frames 2221 and 2249.
+          Benchmark variant: MaskResizer tile size is 128x128 instead of the 64x64 baseline. Validate speed and image output before normal use.
           This is an experimental diagnostic DLL, not a normal release.
 
           Installation:
