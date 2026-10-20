@@ -1,4 +1,4 @@
-name: Build verified Zen 3 AVX2 LTO benchmark
+name: Build clean Zen 3 AVX2 LTO comparison
 
 on:
   push:
@@ -36,563 +36,135 @@ jobs:
             mingw-w64-clang-x86_64-uv
             mingw-w64-clang-x86_64-zimg
 
-      - name: Clone upstream source
+      - name: Prepare identical clean source trees
         run: |
           git clone https://github.com/myrsloik/mvutensils.git upstream
           cd upstream
-          echo "UPSTREAM_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          git log -1 --oneline
+          git checkout 4360d2ccfe3dc943c532e9ea7cd39c51dc0fd315
+          cd ..
+          cp -a upstream upstream-nolto
+          cp -a upstream upstream-lto
+          echo "Pinned upstream commit: 4360d2ccfe3dc943c532e9ea7cd39c51dc0fd315"
 
-      - name: Instrument targeted MVUtensils frame stages
+      - name: Build clean LTO-off and LTO-on variants
         run: |
-          cd upstream
-          python - <<'PY'
-          from pathlib import Path
+          set -e
+          mkdir -p dist/extracted
 
-          helper = r'''
-          #pragma once
-          #ifndef NOMINMAX
-          #define NOMINMAX
-          #endif
-          #include <windows.h>
-          #include <atomic>
-          #include <chrono>
-          #include <cstdint>
-          #include <cstdio>
-          #include <cstring>
-          #include <new>
-          #include <string>
+          for variant in upstream-nolto upstream-lto; do
+            cd "$variant"
 
-          namespace MvuFrameTimingDiag {
-          using Clock = std::chrono::steady_clock;
-
-          struct RequestStamp {
-              Clock::time_point requested;
-              int detail;
-          };
-
-          inline bool IsTarget(const char *stage, int n) noexcept {
-              if (std::strcmp(stage, "FlowFPS") == 0)
-                  return n >= 2180 && n <= 2280;
-              if (std::strcmp(stage, "Analyse") == 0 || std::strcmp(stage, "Super") == 0)
-                  return n >= 1430 && n <= 1530;
-              return false;
-          }
-
-          inline int NewInstanceId() noexcept {
-              static std::atomic<int> next{1};
-              return next.fetch_add(1, std::memory_order_relaxed);
-          }
-
-          inline HANDLE LogHandle() noexcept {
-              static HANDLE handle = []() noexcept {
-                  if (!CreateDirectoryW(L"D:\\MVtools", nullptr) &&
-                      GetLastError() != ERROR_ALREADY_EXISTS)
-                      return INVALID_HANDLE_VALUE;
-
-                  std::wstring path = L"D:\\MVtools\\MVUtensils_FrameTimingDiag_";
-                  path += std::to_wstring(GetCurrentProcessId());
-                  path += L".txt";
-                  return CreateFileW(path.c_str(), FILE_APPEND_DATA,
-                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                      nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-              }();
-              return handle;
-          }
-
-          inline void Log(const char *stage, int n, int detail,
-                          int64_t waitUs, int64_t workUs) noexcept {
-              char line[256];
-              const auto tNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                  Clock::now().time_since_epoch()).count();
-              const int length = std::snprintf(line, sizeof(line),
-                  "t_ns=%lld stage=%s frame=%d detail=%d wait_us=%lld work_us=%lld\r\n",
-                  static_cast<long long>(tNs), stage, n, detail,
-                  static_cast<long long>(waitUs), static_cast<long long>(workUs));
-              HANDLE handle = LogHandle();
-              if (handle == INVALID_HANDLE_VALUE || length <= 0)
-                  return;
-              const DWORD bytes = static_cast<DWORD>(
-                  length < static_cast<int>(sizeof(line) - 1) ? length : sizeof(line) - 1);
-              DWORD written = 0;
-              WriteFile(handle, line, bytes, &written, nullptr);
-          }
-
-          inline int64_t ElapsedUs(Clock::time_point start) noexcept {
-              return std::chrono::duration_cast<std::chrono::microseconds>(
-                  Clock::now() - start).count();
-          }
-
-          inline void LogPhase(const char *phase, int n, int detail, int64_t workUs) noexcept {
-              char line[256];
-              const auto tNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                  Clock::now().time_since_epoch()).count();
-              const int length = std::snprintf(line, sizeof(line),
-                  "t_ns=%lld stage=FlowFPSPhase frame=%d detail=%d wait_us=-1 work_us=%lld phase=%s\r\n",
-                  static_cast<long long>(tNs), n, detail,
-                  static_cast<long long>(workUs), phase);
-              HANDLE handle = LogHandle();
-              if (handle == INVALID_HANDLE_VALUE || length <= 0)
-                  return;
-              const DWORD bytes = static_cast<DWORD>(
-                  length < static_cast<int>(sizeof(line) - 1) ? length : sizeof(line) - 1);
-              DWORD written = 0;
-              WriteFile(handle, line, bytes, &written, nullptr);
-          }
-
-          inline void Begin(const char *stage, int n, void **frameData, int detail = 0) noexcept {
-              if (!frameData || !IsTarget(stage, n))
-                  return;
-              *frameData = new (std::nothrow) RequestStamp{Clock::now(), detail};
-          }
-
-          class Scope {
-              const char *stage_;
-              int n_;
-              int detail_;
-              bool enabled_;
-              RequestStamp *stamp_;
-              Clock::time_point workStart_;
-              int64_t waitUs_;
-
-          public:
-              Scope(const char *stage, int n, void **frameData, int detail = 0) noexcept
-                  : stage_(stage), n_(n), detail_(detail),
-                    enabled_(IsTarget(stage, n)), stamp_(nullptr),
-                    workStart_(Clock::now()), waitUs_(-1) {
-                  if (!enabled_)
-                      return;
-                  if (frameData && *frameData) {
-                      stamp_ = static_cast<RequestStamp *>(*frameData);
-                      *frameData = nullptr;
-                      waitUs_ = std::chrono::duration_cast<std::chrono::microseconds>(
-                          workStart_ - stamp_->requested).count();
-                      if (detail_ == 0)
-                          detail_ = stamp_->detail;
-                  }
-              }
-
-              ~Scope() noexcept {
-                  if (!enabled_)
-                      return;
-                  const int64_t workUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                      Clock::now() - workStart_).count();
-                  Log(stage_, n_, detail_, waitUs_, workUs);
-                  delete stamp_;
-              }
-
-              Scope(const Scope &) = delete;
-              Scope &operator=(const Scope &) = delete;
-          };
-          }
-          '''
-
-          header = Path("src/FrameTimingDiag.h")
-          if header.exists():
-              raise SystemExit("Refusing to overwrite an existing FrameTimingDiag.h in upstream source.")
-          header.write_text(helper, encoding="utf-8")
-
-          configs = [
-              ("src/Analyse.cpp", "Analyse", "d->deltaFrame", None),
-              ("src/Super.cpp", "Super", "d->diagId", "super"),
-              ("src/FlowFPS.cpp", "FlowFPS", "d->deltaFrame", None),
-          ]
-
-          for filename, stage, detail, special in configs:
-              p = Path(filename)
-              s = p.read_text(encoding="utf-8")
-              if s.count('#include "Common.h"') != 1:
-                  raise SystemExit(f"Could not uniquely locate Common.h include in {filename}")
-              s = s.replace('#include "Common.h"', '#include "Common.h"\n#include "FrameTimingDiag.h"', 1)
-
-              old_sig = "[[maybe_unused]] void **frameData"
-              if s.count(old_sig) != 1:
-                  raise SystemExit(f"Could not uniquely locate frameData parameter in {filename}")
-              s = s.replace(old_sig, "void **frameData", 1)
-
-              initial = "if (activationReason == arInitial) {"
-              ready = "} else if (activationReason == arAllFramesReady) {"
-              if s.count(initial) != 1 or s.count(ready) != 1:
-                  raise SystemExit(f"Could not uniquely locate frame activation branches in {filename}")
-
-              if special == "super":
-                  struct_marker = "struct SuperData {\n"
-                  if s.count(struct_marker) != 1:
-                      raise SystemExit("Could not uniquely locate SuperData.")
-                  s = s.replace(struct_marker, struct_marker + "    int diagId = MvuFrameTimingDiag::NewInstanceId();\n", 1)
-
-              s = s.replace(initial, initial + f'\n        MvuFrameTimingDiag::Begin("{stage}", n, frameData, {detail});', 1)
-              s = s.replace(ready, ready + f'\n        MvuFrameTimingDiag::Scope stageDiag("{stage}", n, frameData, {detail});', 1)
-              p.write_text(s, encoding="utf-8")
-              print(f"Instrumented {filename} for {stage} frame timing.")
-
-          # Add targeted substage timers inside FlowFPS, without changing frame output.
-          p = Path("src/FlowFPS.cpp")
-          s = p.read_text(encoding="utf-8")
-
-          def replace_once(old, new, label):
-              global s
-              count = s.count(old)
-              if count != 1:
-                  raise SystemExit(f"Could not uniquely patch FlowFPS {label}: {count} matches")
-              s = s.replace(old, new, 1)
-
-          def replace_first(old, new, label):
-              global s
-              count = s.count(old)
-              if count < 1:
-                  raise SystemExit(f"Could not find FlowFPS {label}")
-              s = s.replace(old, new, 1)
-
-          replace_once(
-              'MvuFrameTimingDiag::Scope stageDiag("FlowFPS", n, frameData, d->deltaFrame);\n        VSFrame *dst = nullptr;',
-              'MvuFrameTimingDiag::Scope stageDiag("FlowFPS", n, frameData, d->deltaFrame);\n'
-              '        const bool diagFlowTarget = MvuFrameTimingDiag::IsTarget("FlowFPS", n);\n'
-              '        auto diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
-              '        VSFrame *dst = nullptr;',
-              "target frame guard")
-
-          replace_once(
-              '            MotionBlockPyramid vectorsF(vectorsLoadFrame ? vsapi->getFrameFilter(nright, d->mvfw, frameCtx) : nullptr, 1, d->prefix, vsapi, d->mvfwGeometry);\n'
-              '            MotionBlockPyramid vectorsB(vectorsLoadFrame ? vsapi->getFrameFilter(nleft, d->mvbw, frameCtx) : nullptr, 1, d->prefix, vsapi, d->mvbwGeometry);\n\n'
-              '            if (vectorsB.IsUsable(d->thscd1, d->thscd2) && vectorsF.IsUsable(d->thscd1, d->thscd2)) {',
-              '            diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
-              '            MotionBlockPyramid vectorsF(vectorsLoadFrame ? vsapi->getFrameFilter(nright, d->mvfw, frameCtx) : nullptr, 1, d->prefix, vsapi, d->mvfwGeometry);\n'
-              '            MotionBlockPyramid vectorsB(vectorsLoadFrame ? vsapi->getFrameFilter(nleft, d->mvbw, frameCtx) : nullptr, 1, d->prefix, vsapi, d->mvbwGeometry);\n'
-              '            const bool diagVectorsUsable = vectorsB.IsUsable(d->thscd1, d->thscd2) && vectorsF.IsUsable(d->thscd1, d->thscd2);\n'
-              '            if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("vectors_load", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n\n'
-              '            if (diagVectorsUsable) {',
-              "motion vectors phase")
-
-          replace_once(
-              '                FramePyramid src(vsapi->getFrameFilter(nleft, d->super, frameCtx), 1, d->prefix, vsapi, d->superGeometry);',
-              '                diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
-              '                FramePyramid src(vsapi->getFrameFilter(nleft, d->super, frameCtx), 1, d->prefix, vsapi, d->superGeometry);',
-              "frame pyramid phase start")
-
-          replace_once(
-              '                SetFpsDuration(dst, d->vi.fpsNum, d->vi.fpsDen, vsapi);\n\n                auto SmallB = vectorsB.MakeSmallVectorMasks();',
-              '                SetFpsDuration(dst, d->vi.fpsNum, d->vi.fpsDen, vsapi);\n'
-              '                if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("frame_setup", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n\n'
-              '                diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
-              '                auto SmallB = vectorsB.MakeSmallVectorMasks();',
-              "frame pyramid phase end")
-
-          replace_once(
-              '                auto MaskSmallF = vectorsF.MakeVectorOcclusionMask<uint16_t>(d->ml, 1.0f, time256, true);\n\n'
-              '                auto tmp = MaskResizer::GetTmpBuffer(std::max(d->maskResizerFull.tmpSize, d->maskResizerSubSampled.tmpSize));',
-              '                auto MaskSmallF = vectorsF.MakeVectorOcclusionMask<uint16_t>(d->ml, 1.0f, time256, true);\n'
-              '                if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("base_masks", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n\n'
-              '                diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
-              '                auto tmp = MaskResizer::GetTmpBuffer(std::max(d->maskResizerFull.tmpSize, d->maskResizerSubSampled.tmpSize));',
-              "base masks phase")
-
-          replace_once(
-              '                auto bufSmallBY = MaskResizer::MakeBufferPair(SmallB->VYSmallY, SmallB->pitchVSmallY, dstTileYB.get());\n\n'
-              '                MotionBlockPyramid vectorsFF(d->extraMask ? vsapi->getFrameFilter(nleft, d->mvfw, frameCtx) : nullptr, 1, d->prefix, vsapi, d->mvfwGeometry);',
-              '                auto bufSmallBY = MaskResizer::MakeBufferPair(SmallB->VYSmallY, SmallB->pitchVSmallY, dstTileYB.get());\n'
-              '                if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("tile_buffers", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n\n'
-              '                diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
-              '                MotionBlockPyramid vectorsFF(d->extraMask ? vsapi->getFrameFilter(nleft, d->mvfw, frameCtx) : nullptr, 1, d->prefix, vsapi, d->mvfwGeometry);',
-              "tile buffers phase")
-
-          replace_once(
-              '                MotionBlockPyramid vectorsBB(d->extraMask ? vsapi->getFrameFilter(nright, d->mvbw, frameCtx) : nullptr, 1, d->prefix, vsapi, d->mvbwGeometry);\n\n'
-              '                if (d->extraMask && vectorsBB.IsUsable(d->thscd1, d->thscd2) && vectorsFF.IsUsable(d->thscd1, d->thscd2)) {',
-              '                MotionBlockPyramid vectorsBB(d->extraMask ? vsapi->getFrameFilter(nright, d->mvbw, frameCtx) : nullptr, 1, d->prefix, vsapi, d->mvbwGeometry);\n'
-              '                const bool diagExtraVectorsUsable = d->extraMask && vectorsBB.IsUsable(d->thscd1, d->thscd2) && vectorsFF.IsUsable(d->thscd1, d->thscd2);\n'
-              '                if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("extra_vectors", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n'
-              '                diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n\n'
-              '                if (diagExtraVectorsUsable) {',
-              "extra vectors phase")
-
-          replace_once(
-              '                    auto bufSmallBBY = MaskResizer::MakeBufferPair(SmallBB->VYSmallY, SmallBB->pitchVSmallY, dstTileYBB.get());\n\n'
-              '                    ptrdiff_t dstStrideY = vsapi->getStride(dst, 0);',
-              '                    auto bufSmallBBY = MaskResizer::MakeBufferPair(SmallBB->VYSmallY, SmallBB->pitchVSmallY, dstTileYBB.get());\n'
-              '                    if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("extra_masks", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n\n'
-              '                    diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
-              '                    ptrdiff_t dstStrideY = vsapi->getStride(dst, 0);',
-              "extra masks phase")
-
-          replace_first(
-              '                    if (d->vi.format.numPlanes == 3) {\n'
-              '                        SmallF->AdjustSmallVectorMaskSubSampling(vectorsF.nBlkX, vectorsF.nBlkY, d->vi.format.subSamplingW, d->vi.format.subSamplingH);',
-              '                    if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("luma_loop_extra", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n\n'
-              '                    if (d->vi.format.numPlanes == 3) {\n'
-              '                        diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
-              '                        SmallF->AdjustSmallVectorMaskSubSampling(vectorsF.nBlkX, vectorsF.nBlkY, d->vi.format.subSamplingW, d->vi.format.subSamplingH);',
-              "extra luma phase end")
-
-          replace_once(
-              '                        }\n'
-              '                    }\n'
-              '                } else { // old method without extra frames',
-              '                        }\n'
-              '                        if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("chroma_loop_extra", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n'
-              '                    }\n'
-              '                } else { // old method without extra frames',
-              "extra chroma phase end")
-
-          replace_once(
-              '                } else { // old method without extra frames\n'
-              '                    ptrdiff_t dstStrideY = vsapi->getStride(dst, 0);',
-              '                } else { // old method without extra frames\n'
-              '                    diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
-              '                    ptrdiff_t dstStrideY = vsapi->getStride(dst, 0);',
-              "standard luma phase start")
-
-          replace_once(
-              '                    }\n\n'
-              '                    if (d->vi.format.numPlanes == 3) {\n'
-              '                        SmallF->AdjustSmallVectorMaskSubSampling(vectorsF.nBlkX, vectorsF.nBlkY, d->vi.format.subSamplingW, d->vi.format.subSamplingH);',
-              '                    }\n'
-              '                    if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("luma_loop_standard", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n\n'
-              '                    if (d->vi.format.numPlanes == 3) {\n'
-              '                        diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
-              '                        SmallF->AdjustSmallVectorMaskSubSampling(vectorsF.nBlkX, vectorsF.nBlkY, d->vi.format.subSamplingW, d->vi.format.subSamplingH);',
-              "standard luma phase end")
-
-          replace_once(
-              '                        }\n'
-              '                    }\n'
-              '                }\n\n'
-              '                return dst;',
-              '                        }\n'
-              '                        if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("chroma_loop_standard", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n'
-              '                    }\n'
-              '                }\n\n'
-              '                return dst;',
-              "standard chroma phase end")
-
-          # Split tile mask/vector resampling from the FlowInterExtra pixel loops.
-          def replace_after(marker, old, new, label):
-              global s
-              m = s.find(marker)
-              if m < 0:
-                  raise SystemExit(f"Could not find FlowFPS {label} marker")
-              i = s.find(old, m + len(marker))
-              if i < 0:
-                  raise SystemExit(f"Could not find FlowFPS {label} target")
-              s = s[:i] + s[i:].replace(old, new, 1)
-
-          # Luma: first matching destination is the extra-mask path.
-          replace_first(
-              '                    uint8_t *dstPtrY = vsapi->getWritePtr(dst, 0);',
-              '                    uint8_t *dstPtrY = vsapi->getWritePtr(dst, 0);\n'
-              '                    int64_t diagMaskLumaUs = 0;\n'
-              '                    int64_t diagInterLumaUs = 0;',
-              "luma substage accumulators")
-
-          process_line = '                        tile.Process(tmp.get(), bufMaskF, bufMaskB, bufSmallFX, bufSmallFY, bufSmallBX, bufSmallBY, bufSmallFFX, bufSmallFFY, bufSmallBBX, bufSmallBBY);'
-          replace_first(
-              process_line,
-              '                        auto diagInnerStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
-              + process_line + '\n'
-              '                        if (diagFlowTarget) diagMaskLumaUs += MvuFrameTimingDiag::ElapsedUs(diagInnerStart);',
-              "luma tile mask timer")
-
-          replace_first(
-              '                        FlowInterExtra<PixelType>(dstPtrY + tile.dstX * sizeof(PixelType) + tile.dstY * dstStrideY, dstStrideY,',
-              '                        diagInnerStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
-              '                        FlowInterExtra<PixelType>(dstPtrY + tile.dstX * sizeof(PixelType) + tile.dstY * dstStrideY, dstStrideY,',
-              "luma interpolation start")
-          replace_first(
-              '                             dstTileXBB.get(), dstTileXFF.get(), dstTileYBB.get(), dstTileYFF.get());',
-              '                             dstTileXBB.get(), dstTileXFF.get(), dstTileYBB.get(), dstTileYFF.get());\n'
-              '                        if (diagFlowTarget) diagInterLumaUs += MvuFrameTimingDiag::ElapsedUs(diagInnerStart);',
-              "luma interpolation end")
-          replace_once(
-              '                    if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("luma_loop_extra", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));',
-              '                    if (diagFlowTarget) {\n'
-              '                        MvuFrameTimingDiag::LogPhase("mask_resize_luma", n, d->deltaFrame, diagMaskLumaUs);\n'
-              '                        MvuFrameTimingDiag::LogPhase("interpolate_luma", n, d->deltaFrame, diagInterLumaUs);\n'
-              '                        MvuFrameTimingDiag::LogPhase("luma_loop_extra", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n'
-              '                    }',
-              "luma substage logs")
-
-          # Chroma: locate the extra-mask U/V tile loop, then time mask work and both plane interpolations.
-          replace_first(
-              '                        for (auto &tile : (d->vi.format.subSamplingH > 0 || d->vi.format.subSamplingW > 0) ? d->maskResizerSubSampled.tiles : d->maskResizerFull.tiles) {',
-              '                        int64_t diagMaskChromaUs = 0;\n'
-              '                        int64_t diagInterChromaUs = 0;\n'
-              '                        for (auto &tile : (d->vi.format.subSamplingH > 0 || d->vi.format.subSamplingW > 0) ? d->maskResizerSubSampled.tiles : d->maskResizerFull.tiles) {',
-              "chroma substage accumulators")
-
-          replace_after(
-              '                        for (auto &tile : (d->vi.format.subSamplingH > 0 || d->vi.format.subSamplingW > 0) ? d->maskResizerSubSampled.tiles : d->maskResizerFull.tiles) {',
-              process_line,
-              '                            auto diagInnerStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
-              + process_line + '\n'
-              '                            if (diagFlowTarget) diagMaskChromaUs += MvuFrameTimingDiag::ElapsedUs(diagInnerStart);',
-              "chroma tile mask timer")
-
-          replace_first(
-              '                            FlowInterExtra<PixelType>(dstPtrU + tile.dstX * sizeof(PixelType) + tile.dstY * dstStrideU, dstStrideU,',
-              '                            diagInnerStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
-              '                            FlowInterExtra<PixelType>(dstPtrU + tile.dstX * sizeof(PixelType) + tile.dstY * dstStrideU, dstStrideU,',
-              "U interpolation start")
-          replace_after(
-              '                            FlowInterExtra<PixelType>(dstPtrU + tile.dstX * sizeof(PixelType) + tile.dstY * dstStrideU, dstStrideU,',
-              '                                 dstTileXBB.get(), dstTileXFF.get(), dstTileYBB.get(), dstTileYFF.get());',
-              '                                 dstTileXBB.get(), dstTileXFF.get(), dstTileYBB.get(), dstTileYFF.get());\n'
-              '                            if (diagFlowTarget) diagInterChromaUs += MvuFrameTimingDiag::ElapsedUs(diagInnerStart);\n'
-              '                            diagInnerStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};',
-              "U interpolation end")
-          replace_first(
-              '                            FlowInterExtra<PixelType>(dstPtrV + tile.dstX * sizeof(PixelType) + tile.dstY * dstStrideV, dstStrideV,',
-              '                            diagInnerStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
-              '                            FlowInterExtra<PixelType>(dstPtrV + tile.dstX * sizeof(PixelType) + tile.dstY * dstStrideV, dstStrideV,',
-              "V interpolation start")
-          replace_after(
-              '                            FlowInterExtra<PixelType>(dstPtrV + tile.dstX * sizeof(PixelType) + tile.dstY * dstStrideV, dstStrideV,',
-              '                                 dstTileXBB.get(), dstTileXFF.get(), dstTileYBB.get(), dstTileYFF.get());',
-              '                                 dstTileXBB.get(), dstTileXFF.get(), dstTileYBB.get(), dstTileYFF.get());\n'
-              '                            if (diagFlowTarget) diagInterChromaUs += MvuFrameTimingDiag::ElapsedUs(diagInnerStart);',
-              "V interpolation end")
-          replace_once(
-              '                        if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("chroma_loop_extra", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));',
-              '                        if (diagFlowTarget) {\n'
-              '                            MvuFrameTimingDiag::LogPhase("mask_resize_chroma", n, d->deltaFrame, diagMaskChromaUs);\n'
-              '                            MvuFrameTimingDiag::LogPhase("interpolate_chroma_uv", n, d->deltaFrame, diagInterChromaUs);\n'
-              '                            MvuFrameTimingDiag::LogPhase("chroma_loop_extra", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n'
-              '                        }',
-              "chroma substage logs")
-
-          print("Added per-frame timing split between tile.Process and FlowInterExtra for luma/chroma.")
-
-          p.write_text(s, encoding="utf-8")
-          print("Added FlowFPS internal phase timers for vectors, frame setup, masks, and luma/chroma loops.")
-
-          print("Diagnostic windows: Analyse/Super frames 1430-1530; FlowFPS frames 2180-2280.")
-          PY
-
-      - name: Apply and commit Zen 3 tuning to AVX2 build variant only
-        run: |
-          cd upstream
-          python - <<'PY'
+            python - <<'PY'
           from pathlib import Path
           p = Path("meson.build")
           s = p.read_text(encoding="utf-8")
           old = "'1': ['-march=x86-64-v3'],"
           new = "'1': ['-march=x86-64-v3', '-mtune=znver3'],"
           if s.count(old) != 1:
-              raise SystemExit("Could not uniquely locate the upstream AVX2 march setting; refusing to patch.")
+              raise SystemExit("Could not uniquely locate the AVX2 compiler setting; refusing to patch.")
           p.write_text(s.replace(old, new), encoding="utf-8")
-          print("Patched AVX2 variant: -march=x86-64-v3 -mtune=znver3")
+          print("Applied identical AVX2 flags: -march=x86-64-v3 -mtune=znver3")
           PY
-          git add meson.build src/FrameTimingDiag.h src/Analyse.cpp src/Super.cpp src/FlowFPS.cpp
-          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Add targeted frame-stage timing diagnostics and Zen 3 tuning"
-          echo "PATCHED_SOURCE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-          git show --stat --oneline HEAD
 
-      - name: Build and verify wheel/source distribution
-        run: |
-          cd upstream
-          uv build -Csetup-args="-Dprefer_static=true" -Csetup-args="-Dcpp_link_args=-static" -Csetup-args="-Db_lto=true"
-          python - <<'PY'
+            if [ "$variant" = "upstream-lto" ]; then
+              LTO=true
+              LABEL="LTO enabled"
+            else
+              LTO=false
+              LABEL="LTO disabled"
+            fi
+
+            uv build -Csetup-args="-Dprefer_static=true" -Csetup-args="-Dcpp_link_args=-static" -Csetup-args="-Db_lto=$LTO"
+
+            python - "$variant" "$LTO" <<'PY'
           from pathlib import Path
-          import tarfile
-          import zipfile
-
-          dist = Path("dist")
-          sdists = list(dist.glob("*.tar.gz"))
-          wheels = list(dist.glob("*.whl"))
-          if len(sdists) != 1 or len(wheels) != 1:
-              raise SystemExit(f"Expected one sdist and one wheel; found {len(sdists)} and {len(wheels)}")
-
-          expected = "'1': ['-march=x86-64-v3', '-mtune=znver3'],"
-          with tarfile.open(sdists[0], "r:gz") as archive:
-              matches = []
-              for member in archive.getmembers():
-                  if member.isfile() and member.name.endswith("meson.build"):
-                      source = archive.extractfile(member).read().decode("utf-8")
-                      if "march_levels = {" in source:
-                          matches.append((member.name, source))
-              if len(matches) != 1:
-                  raise SystemExit(f"Expected one primary Meson build file containing march_levels; found {len(matches)}")
-              name, source = matches[0]
-              if expected not in source:
-                  raise SystemExit(f"Verification failed: Zen 3 tuning flag is missing from packaged {name}.")
-          print(f"Verified: {name} contains the requested -mtune=znver3 AVX2 setting.")
-
-          with zipfile.ZipFile(wheels[0]) as archive:
-              dlls = [n for n in archive.namelist() if n.endswith("/mvutensils.avx2.dll")]
-              if len(dlls) != 1:
-                  raise SystemExit(f"Expected one AVX2 DLL in wheel; found {len(dlls)}")
-              dll = archive.read(dlls[0])
-              if not dll.startswith(b"MZ"):
-                  raise SystemExit("Verification failed: the AVX2 payload is not a Windows PE file.")
-          print(f"Verified: wheel contains Windows AVX2 DLL ({len(dll):,} bytes).")
+          import sys, zipfile
+          variant, lto = sys.argv[1], sys.argv[2]
+          wheels = list(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"{variant}: expected one wheel, found {len(wheels)}")
+          with zipfile.ZipFile(wheels[0]) as z:
+              names = [n for n in z.namelist() if n.endswith("/mvutensils.avx2.dll")]
+              if len(names) != 1:
+                  raise SystemExit(f"{variant}: expected one AVX2 DLL, found {len(names)}")
+              dll = z.read(names[0])
+          if not dll.startswith(b"MZ"):
+              raise SystemExit(f"{variant}: DLL is not a Windows PE file")
+          out = Path("..") / "dist" / "extracted" / variant / "mvutensils.avx2.dll"
+          out.parent.mkdir(parents=True, exist_ok=True)
+          out.write_bytes(dll)
+          (out.parent / "BUILD-INFO.txt").write_text(
+              f"Variant: {variant}\nLTO: {lto}\n"
+              "Compiler tuning: -mtune=znver3\n"
+              "AVX2 ISA floor: -march=x86-64-v3\n"
+              "Instrumentation: none; clean upstream source except for compiler flags\n"
+              "Tile size: upstream default 64x64; unchanged\n"
+              "Upstream commit: 4360d2ccfe3dc943c532e9ea7cd39c51dc0fd315\n",
+              encoding="utf-8")
+          print(f"Extracted clean {variant} AVX2 DLL: {len(dll):,} bytes")
           PY
-          mkdir -p ../dist
-          cp dist/*.whl ../dist/
-          cp dist/*.tar.gz ../dist/
-          echo "Built from upstream commit: $UPSTREAM_COMMIT" > ../dist/BUILD-INFO.txt
-          echo "Patched source commit: $PATCHED_SOURCE_COMMIT" >> ../dist/BUILD-INFO.txt
-          echo "Compiler: Clang (MSYS2 CLANG64)" >> ../dist/BUILD-INFO.txt
-          echo "Extra flag: -mtune=znver3; AVX2 ISA floor retained as -march=x86-64-v3" >> ../dist/BUILD-INFO.txt
-          echo "Meson Link-Time Optimization: -Db_lto=true" >> ../dist/BUILD-INFO.txt
-          echo "Source-distribution verification: passed" >> ../dist/BUILD-INFO.txt
+            strip "../dist/extracted/$variant/mvutensils.avx2.dll"
+            cd ..
+          done
 
-      - name: Normalize wheel tag and strip DLL
-        run: |
-          cd dist
-          wheel tags --remove --python-tag py3 --abi-tag none *.whl
-          wheel unpack --dest unpacked *.whl
-          rm *.whl
-          strip $(find unpacked -name '*.dll')
-          wheel pack unpacked/*
-
-
-      - name: Package targeted diagnostic DLL
+      - name: Package and verify clean comparison DLLs
         run: |
           python - <<'PY'
           from pathlib import Path
           import zipfile
 
-          root = Path("dist")
-          dlls = list((root / "unpacked").rglob("mvutensils.avx2.dll"))
-          if len(dlls) != 1:
-              raise SystemExit(f"Expected one instrumented AVX2 DLL in unpacked wheel; found {len(dlls)}")
+          root = Path("dist/extracted")
+          readme = """Clean MVUtensils AVX2 comparison builds
 
-          readme = """MVUtensils targeted frame-stage timing diagnostic build
-          Build purpose: isolate the delayed frame readiness seen near output frames 2221 and 2249.
-          This is an experimental diagnostic DLL, not a normal release.
+          Both DLLs use the same pinned upstream source and the same -march=x86-64-v3 -mtune=znver3 flags.
+          The only intended build setting difference is Meson Link-Time Optimization (LTO): on versus off.
+          No diagnostic timing instrumentation or interpolation-source edits are included.
+          The upstream 64x64 tile size and interpolation algorithm are unchanged.
 
-          Installation:
+          Test one variant at a time:
           1. Back up the currently installed mvutensils.avx2.dll.
-          2. Replace only that AVX2 DLL with the one in this archive. Keep the other installed MVUtensils files unchanged.
-          3. Reproduce the same PotPlayer playback and allow it to pass media times around 24.69 s and 25.00 s.
-          4. Close PotPlayer and find D:\\MVtools\\MVUtensils_FrameTimingDiag_<PID>.txt, then share that log.
-
-          Recorded frame windows:
-          - Analyse and Super: frames 1430 through 1530.
-          - FlowFPS: frames 2180 through 2280.
-
-          Log fields:
-          - wait_us: elapsed wall time from VapourSynth's arInitial request until arAllFramesReady, including waiting for dependent clips/frames.
-          - work_us: elapsed wall time inside the filter's arAllFramesReady processing.
-          - Analyse detail: delta direction (+1/-1).
-          - Super detail: instance ID, to distinguish multiple Super nodes.
-          - FlowFPS detail: delta frame setting.
-          - FlowFPSPhase records: vectors_load, frame_setup, base_masks, tile_buffers, extra_vectors, extra_masks, luma/chroma loop totals, mask_resize_luma/chroma and interpolate_luma/chroma_uv.
-
-          The file is process-specific and is initialized on the first diagnostic record. Restore the backed-up DLL after diagnosis.
+          2. Extract the selected ZIP and replace only mvutensils.avx2.dll.
+          3. Keep every other MVUtensils DLL, manifest, and VapourSynth setting unchanged.
+          4. Repeat the same PotPlayer 4K clip and compare equivalent playback/seek sections.
+          5. Restore the backup when finished.
+          These are experimental comparison builds, not official releases.
           """
-          readme = "\n".join(line.strip() for line in readme.splitlines()).strip() + "\n"
 
-          out = root / "MVUtensils-FrameTimingDiag-AVX2.zip"
-          with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as z:
-              z.write(dlls[0], "mvutensils.avx2.dll")
-              z.writestr("README.txt", readme)
-          print(f"Packaged {dlls[0]} as {out} ({out.stat().st_size:,} bytes).")
+          variants = [
+              ("upstream-nolto", "MVUtensils-Clean-NoLTO-AVX2.zip"),
+              ("upstream-lto", "MVUtensils-Clean-LTO-AVX2.zip"),
+          ]
+          for folder, archive_name in variants:
+              d = root / folder
+              dll = d / "mvutensils.avx2.dll"
+              info = d / "BUILD-INFO.txt"
+              if not dll.is_file() or dll.stat().st_size < 1_000_000:
+                  raise SystemExit(f"Missing or implausibly small DLL: {dll}")
+              if dll.read_bytes()[:2] != b"MZ":
+                  raise SystemExit(f"Invalid PE header: {dll}")
+              with zipfile.ZipFile(Path("dist") / archive_name, "w", zipfile.ZIP_DEFLATED) as z:
+                  z.write(dll, "mvutensils.avx2.dll")
+                  z.write(info, "BUILD-INFO.txt")
+                  z.writestr("README.txt", readme)
+              print(f"Packaged {archive_name}: {(Path('dist') / archive_name).stat().st_size:,} bytes")
+
+          (Path("dist") / "BUILD-SUMMARY.txt").write_text(
+              "Clean paired build completed.\n"
+              "Pinned upstream: 4360d2ccfe3dc943c532e9ea7cd39c51dc0fd315\n"
+              "Shared flags: -march=x86-64-v3 -mtune=znver3\n"
+              "Pair difference: LTO off vs LTO on\n"
+              "Diagnostic instrumentation: none\n"
+              "Tile size: unchanged upstream 64x64\n",
+              encoding="utf-8")
           PY
 
-      - name: Upload verified Windows build artifact
+      - name: Upload clean comparison artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: mvutensils-znver3-lto-windows-verified
-          path: dist/*
+          name: mvutensils-clean-lto-comparison
+          path: |
+            dist/MVUtensils-Clean-NoLTO-AVX2.zip
+            dist/MVUtensils-Clean-LTO-AVX2.zip
+            dist/BUILD-SUMMARY.txt
           if-no-files-found: error
           retention-days: 14
