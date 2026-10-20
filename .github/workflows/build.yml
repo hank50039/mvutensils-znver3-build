@@ -86,12 +86,11 @@ jobs:
 
           inline HANDLE LogHandle() noexcept {
               static HANDLE handle = []() noexcept {
-                  wchar_t temp[MAX_PATH + 1]{};
-                  const DWORD length = GetTempPathW(MAX_PATH, temp);
-                  if (length == 0 || length >= MAX_PATH)
+                  if (!CreateDirectoryW(L"D:\\MVtools", nullptr) &&
+                      GetLastError() != ERROR_ALREADY_EXISTS)
                       return INVALID_HANDLE_VALUE;
-                  std::wstring path(temp, length);
-                  path += L"MVUtensils_FrameTimingDiag_";
+
+                  std::wstring path = L"D:\\MVtools\\MVUtensils_FrameTimingDiag_";
                   path += std::to_wstring(GetCurrentProcessId());
                   path += L".txt";
                   return CreateFileW(path.c_str(), FILE_APPEND_DATA,
@@ -304,7 +303,7 @@ jobs:
           1. Back up the currently installed mvutensils.avx2.dll.
           2. Replace only that AVX2 DLL with the one in this archive. Keep the other installed MVUtensils files unchanged.
           3. Reproduce the same PotPlayer playback and allow it to pass media times around 24.69 s and 25.00 s.
-          4. Close PotPlayer and find %TEMP%\\MVUtensils_FrameTimingDiag_<PID>.txt, then share that log.
+          4. Close PotPlayer and find D:\\MVtools\\MVUtensils_FrameTimingDiag_<PID>.txt, then share that log.
 
           Recorded frame windows:
           - Analyse and Super: frames 1430 through 1530.
