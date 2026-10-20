@@ -4,12 +4,16 @@ ROOT = Path("upstream")
 CPP = ROOT / "Source" / "VideoRenderer.cpp"
 HEADER = ROOT / "Source" / "VideoRenderer.h"
 DX11_CPP = ROOT / "Source" / "DX11VideoProcessor.cpp"
-if not CPP.is_file() or not HEADER.is_file() or not DX11_CPP.is_file():
-    raise SystemExit("Expected MPC Video Renderer source files are missing.")
+RENBASE2_CPP = ROOT / "Source" / "renbase2.cpp"
+BASE_RENDERER_CPP = ROOT / "external" / "BaseClasses" / "renbase.cpp"
+if not all(path.is_file() for path in (CPP, HEADER, DX11_CPP, RENBASE2_CPP, BASE_RENDERER_CPP)):
+    raise SystemExit("Expected MPC Video Renderer and BaseClasses scheduler sources are missing.")
 
 source = CPP.read_text(encoding="utf-8")
 header = HEADER.read_text(encoding="utf-8")
 dx11_source = DX11_CPP.read_text(encoding="utf-8")
+renbase2_source = RENBASE2_CPP.read_text(encoding="utf-8")
+base_renderer_source = BASE_RENDERER_CPP.read_text(encoding="utf-8")
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
     count = text.count(old)
@@ -28,7 +32,7 @@ header = replace_once(
 header = replace_once(
     header,
     '#include "SubPic/ISubPic.h"',
-    '#include "SubPic/ISubPic.h"\n\nvoid MPCVRProbeLog(const wchar_t* format, ...);\nLONGLONG MPCVRProbeElapsedUs(LONGLONG begin, LONGLONG end);\nbool MPCVRProbeShouldLogStage(LONGLONG elapsedUs, HRESULT hr);',
+    '#include "SubPic/ISubPic.h"\n\nvoid MPCVRProbeLog(const wchar_t* format, ...);\nLONGLONG MPCVRProbeElapsedUs(LONGLONG begin, LONGLONG end);\nbool MPCVRProbeShouldLogStage(LONGLONG elapsedUs, HRESULT hr);\nvoid MPCVRProbeSetSchedulerContext(const wchar_t* context);\nvoid MPCVRProbeAppendSchedulerContext(const wchar_t* context);\nvoid MPCVRProbeConsumeSchedulerContext(wchar_t* dest, size_t destCount);',
     "declare stage probe helpers",
 )
 
@@ -44,6 +48,43 @@ static std::mutex g_waitProbeLogMutex;
 static std::atomic_int g_waitProbeBudget{12};
 static std::atomic_int g_stageProbeBudget{128};
 static std::atomic_int g_hardStageProbeBudget{64};
+static thread_local wchar_t g_schedulerProbeContext[1024]{};
+
+void MPCVRProbeSetSchedulerContext(const wchar_t* context)
+{
+    if (!context) {
+        g_schedulerProbeContext[0] = L'\0';
+        return;
+    }
+    wcsncpy_s(g_schedulerProbeContext, _countof(g_schedulerProbeContext), context, _TRUNCATE);
+}
+
+void MPCVRProbeAppendSchedulerContext(const wchar_t* context)
+{
+    if (!context || !context[0]) {
+        return;
+    }
+    const size_t currentLength = wcslen(g_schedulerProbeContext);
+    if (currentLength == 0) {
+        wcsncpy_s(g_schedulerProbeContext, _countof(g_schedulerProbeContext), context, _TRUNCATE);
+        return;
+    }
+    if (currentLength + 2 >= _countof(g_schedulerProbeContext)) {
+        return;
+    }
+    g_schedulerProbeContext[currentLength] = L';';
+    g_schedulerProbeContext[currentLength + 1] = L'\0';
+    wcsncat_s(g_schedulerProbeContext, _countof(g_schedulerProbeContext), context, _TRUNCATE);
+}
+
+void MPCVRProbeConsumeSchedulerContext(wchar_t* dest, size_t destCount)
+{
+    if (!dest || destCount == 0) {
+        return;
+    }
+    wcsncpy_s(dest, destCount, g_schedulerProbeContext, _TRUNCATE);
+    g_schedulerProbeContext[0] = L'\0';
+}
 
 static LONGLONG WaitProbeQpcFrequency()
 {
@@ -322,10 +363,12 @@ receive_setup = r"""
         if (!MPCVRProbeShouldLogStage(receiveUs, result)) {
             return;
         }
+        wchar_t schedulerContext[1024]{};
+        MPCVRProbeConsumeSchedulerContext(schedulerContext, _countof(schedulerContext));
         REFERENCE_TIME sampleStart = 0;
         REFERENCE_TIME sampleStop = 0;
         const HRESULT sampleTimeHr = pSample ? pSample->GetTime(&sampleStart, &sampleStop) : E_POINTER;
-        MPCVRProbeLog(L"RECEIVEPROBE renderer_instance=%p process_id=%lu thread_id=%lu qpc_begin=%lld qpc_end=%lld receive_us=%lld phase=%ls result_hr=0x%08X sample_begin_time_hr=0x%08X sample_begin_start_100ns=%lld sample_begin_stop_100ns=%lld sample_end_time_hr=0x%08X sample_end_start_100ns=%lld sample_end_stop_100ns=%lld state_before=%d state_after=%d filter_state_before=%d filter_state_after=%d streaming_before=%d streaming_after=%d flushing_before=%d flushing_after=%d",
+        MPCVRProbeLog(L"RECEIVEPROBE renderer_instance=%p process_id=%lu thread_id=%lu qpc_begin=%lld qpc_end=%lld receive_us=%lld phase=%ls result_hr=0x%08X sample_begin_time_hr=0x%08X sample_begin_start_100ns=%lld sample_begin_stop_100ns=%lld sample_end_time_hr=0x%08X sample_end_start_100ns=%lld sample_end_stop_100ns=%lld state_before=%d state_after=%d filter_state_before=%d filter_state_after=%d streaming_before=%d streaming_after=%d flushing_before=%d flushing_after=%d scheduler_context=%ls",
             receiveRendererInstance,
             static_cast<unsigned long>(receiveProcessId),
             static_cast<unsigned long>(receiveThreadId),
@@ -347,7 +390,8 @@ receive_setup = r"""
             receiveStreamingBefore,
             static_cast<int>(m_bStreaming),
             receiveFlushingBefore,
-            static_cast<int>(m_bFlushing));
+            static_cast<int>(m_bFlushing),
+            schedulerContext);
     };
 """
 receive_block = receive_block.replace(
@@ -574,17 +618,130 @@ render_block = replace_once(
     "probe DXGI Present")
 dx11_source = dx11_source[:render_start] + render_block + dx11_source[render_end:]
 
+
+# Capture the scheduler's decision before Receive converts a rejection to NOERROR.
+# The context is appended to the existing bounded RECEIVEPROBE record (no scheduler file I/O).
+renbase2_source = replace_once(
+    renbase2_source,
+    """#include "renbase2.h" """.rstrip(),
+    """#include "renbase2.h"
+
+void MPCVRProbeSetSchedulerContext(const wchar_t* context);""",
+    "declare context API in renderer scheduler source",
+)
+renbase2_source = replace_once(
+    renbase2_source,
+    """    // Don't call us unless there's a clock interface to synchronise with
+    ASSERT(m_pClock);""",
+    """    // Don't call us unless there's a clock interface to synchronise with
+    ASSERT(m_pClock);
+    MPCVRProbeSetSchedulerContext(L"");""",
+    "clear scheduler context at decision start",
+)
+renbase2_source = replace_once(
+    renbase2_source,
+    """    m_nNormal = -1;
+    return E_FAIL;                         // drop it""",
+    """    wchar_t schedulerContext[768]{};
+    _snwprintf_s(schedulerContext, _countof(schedulerContext), _TRUNCATE,
+        L"decision=late_drop;stream_now_100ns=%lld;sample_start_after_bias_100ns=%lld;sample_stop_after_bias_100ns=%lld;lateness_100ns=%d;duration_100ns=%d;frame_avg_100ns=%d;render_avg_100ns=%d;wait_avg_state_100ns=%d;supplier_quality=%d;earliness_100ns=%d;since_last_draw_100ns=%lld;normal_count=%d",
+        static_cast<long long>(trRealStream),
+        static_cast<long long>(*ptrStart),
+        static_cast<long long>(*ptrEnd),
+        trTrueLate,
+        trDuration,
+        m_trFrameAvg,
+        m_trRenderAvg,
+        m_trWaitAvg,
+        static_cast<int>(m_bSupplierHandlingQuality),
+        m_trEarliness,
+        static_cast<long long>(trRealStream - m_trLastDraw),
+        m_nNormal);
+    MPCVRProbeSetSchedulerContext(schedulerContext);
+
+    m_nNormal = -1;
+    return E_FAIL;                         // drop it""",
+    "record late-drop decision",
+)
+base_renderer_source = replace_once(
+    base_renderer_source,
+    """#include "measure.h"        // Used for time critical log functions""",
+    """#include "measure.h"        // Used for time critical log functions
+
+void MPCVRProbeAppendSchedulerContext(const wchar_t* context);""",
+    "declare BaseClasses context API",
+)
+schedule_start = base_renderer_source.find("BOOL CBaseRenderer::ScheduleSample(IMediaSample *pMediaSample)")
+schedule_end = base_renderer_source.find("\n\n// This is called when a sample comes due", schedule_start)
+if schedule_start < 0 or schedule_end < 0:
+    raise SystemExit("Could not locate BaseClasses ScheduleSample for scheduler diagnostics.")
+schedule_block = base_renderer_source[schedule_start:schedule_end]
+schedule_block = replace_once(
+    schedule_block,
+    """    REFERENCE_TIME StartSample, EndSample;""",
+    """    REFERENCE_TIME StartSample = 0, EndSample = 0;""",
+    "initialize scheduler timestamps",
+)
+schedule_block = replace_once(
+    schedule_block,
+    """    HRESULT hr = GetSampleTimes(pMediaSample, &StartSample, &EndSample);
+    if (FAILED(hr)) {
+        return FALSE;
+    }""",
+    """    HRESULT hr = GetSampleTimes(pMediaSample, &StartSample, &EndSample);
+    if (FAILED(hr)) {
+        if (hr == E_FAIL) {
+            // E_FAIL is the late-drop signal used by ShouldDrawSampleNow; details are already in TLS.
+            MPCVRProbeAppendSchedulerContext(L"schedule_stage=get_sample_times;hr=0x80004005");
+        } else {
+            wchar_t schedulerContext[256]{};
+            _snwprintf_s(schedulerContext, _countof(schedulerContext), _TRUNCATE,
+                L"schedule_stage=get_sample_times;hr=0x%08X;start_100ns=%lld;stop_100ns=%lld",
+                static_cast<unsigned int>(hr),
+                static_cast<long long>(StartSample),
+                static_cast<long long>(EndSample));
+            MPCVRProbeAppendSchedulerContext(schedulerContext);
+        }
+        return FALSE;
+    }""",
+    "record GetSampleTimes failure",
+)
+schedule_block = replace_once(
+    schedule_block,
+    """    ASSERT(m_dwAdvise == 0);
+    return FALSE;
+}""",
+    """    ASSERT(m_dwAdvise == 0);
+    wchar_t schedulerContext[256]{};
+    _snwprintf_s(schedulerContext, _countof(schedulerContext), _TRUNCATE,
+        L"schedule_stage=advise_time;hr=0x%08X;start_100ns=%lld;stop_100ns=%lld",
+        static_cast<unsigned int>(hr),
+        static_cast<long long>(StartSample),
+        static_cast<long long>(EndSample));
+    MPCVRProbeAppendSchedulerContext(schedulerContext);
+    return FALSE;
+}""",
+    "record AdviseTime failure",
+)
+base_renderer_source = base_renderer_source[:schedule_start] + schedule_block + base_renderer_source[schedule_end:]
+
 if "WaitForSingleObject(m_RenderEvent" in source or "WaitForSingleObject(m_RenderEvent" in dx11_source:
     raise SystemExit("Unsafe diagnostic: polling auto-reset m_RenderEvent.")
 if not all(marker in source for marker in ("WAITPROBE_ENTER", "WAITPROBE_EXIT", "RECEIVEPROBE", "PROCESSPROBE")):
     raise SystemExit("Renderer timing markers missing.")
 if not all(marker in dx11_source for marker in ("DX11STAGE", "MAPPROBE", "PRESENTPROBE")):
     raise SystemExit("DX11 timing markers missing.")
+if "decision=late_drop" not in renbase2_source or "MPCVRProbeSetSchedulerContext" not in renbase2_source:
+    raise SystemExit("Late-drop decision context markers missing.")
+if "schedule_stage=get_sample_times" not in base_renderer_source or "schedule_stage=advise_time" not in base_renderer_source:
+    raise SystemExit("BaseClasses scheduling failure context markers missing.")
 
 if "WAITPROBE_STATE" in source or "const REFERENCE_TIME wpRunStartBefore" in source:
     raise SystemExit("Old invasive state probes remain in source; refusing to continue.")
 
-CPP.write_text(source, encoding="utf-8", newline="\n")
-HEADER.write_text(header, encoding="utf-8", newline="\n")
-DX11_CPP.write_text(dx11_source, encoding="utf-8", newline="\n")
-print(f"Patched {CPP}, {HEADER}, and {DX11_CPP}: bounded WaitForRenderTime, Receive, ProcessSample, Map, and Present timing without event-handle polling.")
+CPP.write_text(source, encoding="utf-8", newline=chr(10))
+HEADER.write_text(header, encoding="utf-8", newline=chr(10))
+DX11_CPP.write_text(dx11_source, encoding="utf-8", newline=chr(10))
+RENBASE2_CPP.write_text(renbase2_source, encoding="utf-8", newline=chr(10))
+BASE_RENDERER_CPP.write_text(base_renderer_source, encoding="utf-8", newline=chr(10))
+print(f"Patched {CPP}, {HEADER}, {DX11_CPP}, {RENBASE2_CPP}, and {BASE_RENDERER_CPP}: added bounded timings plus scheduler decision context.")
