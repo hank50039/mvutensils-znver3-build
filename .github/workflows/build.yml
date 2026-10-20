@@ -1,8 +1,8 @@
-name: Build verified Zen 3 AVX2 tuning
+name: Build verified Zen 3 AVX2 LTO benchmark
 
 on:
   push:
-    branches: [main, mvu-frame-stage-diag-20261020]
+    branches: [main, mvu-frame-stage-diag-20261020, mvu-lto-bench-20261020]
   workflow_dispatch:
 
 permissions:
@@ -489,7 +489,7 @@ jobs:
       - name: Build and verify wheel/source distribution
         run: |
           cd upstream
-          uv build -Csetup-args="-Dprefer_static=true" -Csetup-args="-Dcpp_link_args=-static"
+          uv build -Csetup-args="-Dprefer_static=true" -Csetup-args="-Dcpp_link_args=-static" -Csetup-args="-Db_lto=true"
           python - <<'PY'
           from pathlib import Path
           import tarfile
@@ -532,6 +532,7 @@ jobs:
           echo "Patched source commit: $PATCHED_SOURCE_COMMIT" >> ../dist/BUILD-INFO.txt
           echo "Compiler: Clang (MSYS2 CLANG64)" >> ../dist/BUILD-INFO.txt
           echo "Extra flag: -mtune=znver3; AVX2 ISA floor retained as -march=x86-64-v3" >> ../dist/BUILD-INFO.txt
+          echo "Meson Link-Time Optimization: -Db_lto=true" >> ../dist/BUILD-INFO.txt
           echo "Source-distribution verification: passed" >> ../dist/BUILD-INFO.txt
 
       - name: Normalize wheel tag and strip DLL
@@ -591,7 +592,7 @@ jobs:
       - name: Upload verified Windows build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: mvutensils-znver3-windows-verified
+          name: mvutensils-znver3-lto-windows-verified
           path: dist/*
           if-no-files-found: error
           retention-days: 14
