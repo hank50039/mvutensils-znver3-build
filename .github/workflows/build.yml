@@ -237,6 +237,13 @@ jobs:
                   raise SystemExit(f"Could not uniquely patch FlowFPS {label}: {count} matches")
               s = s.replace(old, new, 1)
 
+          def replace_first(old, new, label):
+              global s
+              count = s.count(old)
+              if count < 1:
+                  raise SystemExit(f"Could not find FlowFPS {label}")
+              s = s.replace(old, new, 1)
+
           replace_once(
               'MvuFrameTimingDiag::Scope stageDiag("FlowFPS", n, frameData, d->deltaFrame);\n        VSFrame *dst = nullptr;',
               'MvuFrameTimingDiag::Scope stageDiag("FlowFPS", n, frameData, d->deltaFrame);\n'
@@ -308,13 +315,9 @@ jobs:
               '                    ptrdiff_t dstStrideY = vsapi->getStride(dst, 0);',
               "extra masks phase")
 
-          replace_once(
-              '                              dstTileXBB.get(), dstTileXFF.get(), dstTileYBB.get(), dstTileYFF.get());\n'
-              '                    }\n\n'
+          replace_first(
               '                    if (d->vi.format.numPlanes == 3) {\n'
               '                        SmallF->AdjustSmallVectorMaskSubSampling(vectorsF.nBlkX, vectorsF.nBlkY, d->vi.format.subSamplingW, d->vi.format.subSamplingH);',
-              '                              dstTileXBB.get(), dstTileXFF.get(), dstTileYBB.get(), dstTileYFF.get());\n'
-              '                    }\n'
               '                    if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("luma_loop_extra", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n\n'
               '                    if (d->vi.format.numPlanes == 3) {\n'
               '                        diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
