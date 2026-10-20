@@ -299,8 +299,47 @@ if s.count(add_anchor) != 1:
 s = s.replace(add_anchor, add_replacement, 1)
 filter_cpp.write_text(s, encoding="utf-8", newline="")
 
-# ---------- VapourSynth Filter: retain the tested CAP28 request bound ----------
+# ---------- VapourSynth Filter: retain CAP28 and trace long AddInputSample waits ----------
 s = frame_cpp.read_text(encoding="utf-8-sig")
+
+# Split long Receive/AddInputSample calls into condition-variable wait time versus
+# post-wait work. This is sparse, thresholded diagnostics only; it does not change
+# the wait predicate, frame ordering, interpolation, or the proven CAP28 limit.
+wait_anchor = '''    HRESULT hr;
+
+    _addInputSampleCv.wait(_filter.m_csReceive, [this]() -> bool {'''
+wait_replacement = '''    HRESULT hr;
+    const auto addInputSampleWaitBegin = std::chrono::steady_clock::now();
+    REFERENCE_TIME diagInputStart = 0;
+    REFERENCE_TIME diagInputStop = 0;
+    const HRESULT diagInputTimeHr = inputSample->GetTime(&diagInputStart, &diagInputStop);
+
+    _addInputSampleCv.wait(_filter.m_csReceive, [this]() -> bool {'''
+if s.count(wait_anchor) != 1:
+    raise SystemExit("Could not uniquely locate AddInputSample wait start; refusing to patch")
+s = s.replace(wait_anchor, wait_replacement, 1)
+
+wait_end_anchor = '''    });
+
+    if (_isFlushing || _isStopping) {'''
+wait_end_replacement = '''    });
+    const long long addInputSampleWaitUs = static_cast<long long>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - addInputSampleWaitBegin).count());
+    if (addInputSampleWaitUs >= 20000 || _filter._isInputMediaTypeChanged || _filter._needReloadScript) {
+        Environment::GetInstance().Log(
+            L"STARTPOINTDIAG AddInputSample_wait wait_us %lld input_time_hr 0x%08lX input_start %lld input_stop %lld next_source %d last_used_source %d extra_src_buffer %d input_mt_changed %d need_reload %d flushing %d stopping %d",
+            addInputSampleWaitUs, static_cast<unsigned long>(diagInputTimeHr),
+            static_cast<long long>(diagInputStart), static_cast<long long>(diagInputStop),
+            _nextSourceFrameNb, _lastUsedSourceFrameNb, _extraSrcBuffer,
+            _filter._isInputMediaTypeChanged, _filter._needReloadScript, _isFlushing, _isStopping);
+    }
+
+    if (_isFlushing || _isStopping) {'''
+if (s.count(wait_end_anchor) != 1):
+    raise SystemExit("Could not uniquely locate AddInputSample wait end; refusing to patch")
+s = s.replace(wait_end_anchor, wait_end_replacement, 1)
+
 ns = "namespace SynthFilter {\n\n"
 if s.count(ns) != 1:
     raise SystemExit("Could not uniquely locate SynthFilter namespace in frame_handler.cpp")
