@@ -53,8 +53,11 @@ jobs:
           if ($frame -notmatch 'MAX_PENDING_OUTPUT_FRAMES = 28') {
             throw "Cap-28 source marker is missing."
           }
-          if ($frame -notmatch 'CAP28DIAG_DELIVER' -or $frame -notmatch 'CAP28DIAG_RESET' -or $frame -notmatch 'CAP28DIAG_THROTTLE') {
-            throw "CAP-28 start-position timing markers are missing."
+          if ($frame -notmatch 'CAP28DIAG_RESET' -or $frame -notmatch 'CAP28DIAG_THROTTLE') {
+            throw "CAP-28 sparse start-position markers are missing."
+          }
+          if ($frame -match 'CAP28DIAG_DELIVER') {
+            throw "Per-frame CAP28 diagnostic logging must remain disabled."
           }
           $dllCandidates = Get-ChildItem avisynth_filter -Recurse -File -Filter *.ax |
             Where-Object { $_.FullName -match '[\\/]x64[\\/]Release[\\/]' }
@@ -75,7 +78,9 @@ jobs:
             "Output: vapoursynth_filter_x64.ax"
             "Existing diagnostics: FORMAT_DIFF_*, RECVTRACE, DYNAMIC_MT"
             "Output request cap: 28 (unchanged)"
-            "New CAP28 start-position diagnostics: CAP28DIAG_RESET, CAP28DIAG_THROTTLE, CAP28DIAG_DELIVER"
+            "New sparse CAP28 diagnostics: CAP28DIAG_RESET and CAP28DIAG_THROTTLE"
+            "Per-frame delivery timing instrumentation is intentionally disabled to minimize overhead"
+            "Existing per-frame filter logs remain available for offline timing correlation"
             "Purpose: compare seek/start positions around the same target media timestamp"
             "This remains a diagnostic build; playback performance is not claimed."
           ) | Set-Content dist/BUILD-INFO.txt
