@@ -50,6 +50,9 @@ jobs:
           if ($src -notmatch 'FORMAT_DIFF_BYTE' -or $src -notmatch 'RECVTRACE AddInputSample_done' -or $src -notmatch 'DYNAMIC_MT') {
             throw "Expected diagnostic source markers are missing."
           }
+          if ($src -match 'DYNAMIC_MT_FASTPATH applied' -or $src -match '_isInputMediaTypeChanged = !traceMetadataOnlyCandidate') {
+            throw "Unsafe BT.709 metadata-only fast path must remain disabled; preserve normal media-type reconfiguration."
+          }
           if ($frame -notmatch 'MAX_PENDING_OUTPUT_FRAMES = 28') {
             throw "Cap-28 source marker is missing."
           }
@@ -77,6 +80,8 @@ jobs:
             "Configuration: Release x64"
             "Output: vapoursynth_filter_x64.ax"
             "Existing diagnostics: FORMAT_DIFF_*, RECVTRACE, DYNAMIC_MT"
+            "BT.709 metadata-only fast path: disabled; normal media-type reconfiguration preserved"
+            "Metadata-only classification remains diagnostic-only"
             "Output request cap: 28 (unchanged)"
             "New sparse CAP28 diagnostics: CAP28DIAG_RESET and CAP28DIAG_THROTTLE"
             "Per-frame delivery timing instrumentation is intentionally disabled to minimize overhead"
