@@ -118,6 +118,28 @@ jobs:
               WriteFile(handle, line, bytes, &written, nullptr);
           }
 
+          inline int64_t ElapsedUs(Clock::time_point start) noexcept {
+              return std::chrono::duration_cast<std::chrono::microseconds>(
+                  Clock::now() - start).count();
+          }
+
+          inline void LogPhase(const char *phase, int n, int detail, int64_t workUs) noexcept {
+              char line[256];
+              const auto tNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  Clock::now().time_since_epoch()).count();
+              const int length = std::snprintf(line, sizeof(line),
+                  "t_ns=%lld stage=FlowFPSPhase frame=%d detail=%d wait_us=-1 work_us=%lld phase=%s\r\n",
+                  static_cast<long long>(tNs), n, detail,
+                  static_cast<long long>(workUs), phase);
+              HANDLE handle = LogHandle();
+              if (handle == INVALID_HANDLE_VALUE || length <= 0)
+                  return;
+              const DWORD bytes = static_cast<DWORD>(
+                  length < static_cast<int>(sizeof(line) - 1) ? length : sizeof(line) - 1);
+              DWORD written = 0;
+              WriteFile(handle, line, bytes, &written, nullptr);
+          }
+
           inline void Begin(const char *stage, int n, void **frameData, int detail = 0) noexcept {
               if (!frameData || !IsTarget(stage, n))
                   return;
@@ -203,6 +225,140 @@ jobs:
               s = s.replace(ready, ready + f'\n        MvuFrameTimingDiag::Scope stageDiag("{stage}", n, frameData, {detail});', 1)
               p.write_text(s, encoding="utf-8")
               print(f"Instrumented {filename} for {stage} frame timing.")
+
+          # Add targeted substage timers inside FlowFPS, without changing frame output.
+          p = Path("src/FlowFPS.cpp")
+          s = p.read_text(encoding="utf-8")
+
+          def replace_once(old, new, label):
+              global s
+              count = s.count(old)
+              if count != 1:
+                  raise SystemExit(f"Could not uniquely patch FlowFPS {label}: {count} matches")
+              s = s.replace(old, new, 1)
+
+          replace_once(
+              'MvuFrameTimingDiag::Scope stageDiag("FlowFPS", n, frameData, d->deltaFrame);\n        VSFrame *dst = nullptr;',
+              'MvuFrameTimingDiag::Scope stageDiag("FlowFPS", n, frameData, d->deltaFrame);\n'
+              '        const bool diagFlowTarget = MvuFrameTimingDiag::IsTarget("FlowFPS", n);\n'
+              '        auto diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
+              '        VSFrame *dst = nullptr;',
+              "target frame guard")
+
+          replace_once(
+              '            MotionBlockPyramid vectorsF(vectorsLoadFrame ? vsapi->getFrameFilter(nright, d->mvfw, frameCtx) : nullptr, 1, d->prefix, vsapi, d->mvfwGeometry);\n'
+              '            MotionBlockPyramid vectorsB(vectorsLoadFrame ? vsapi->getFrameFilter(nleft, d->mvbw, frameCtx) : nullptr, 1, d->prefix, vsapi, d->mvbwGeometry);\n\n'
+              '            if (vectorsB.IsUsable(d->thscd1, d->thscd2) && vectorsF.IsUsable(d->thscd1, d->thscd2)) {',
+              '            diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
+              '            MotionBlockPyramid vectorsF(vectorsLoadFrame ? vsapi->getFrameFilter(nright, d->mvfw, frameCtx) : nullptr, 1, d->prefix, vsapi, d->mvfwGeometry);\n'
+              '            MotionBlockPyramid vectorsB(vectorsLoadFrame ? vsapi->getFrameFilter(nleft, d->mvbw, frameCtx) : nullptr, 1, d->prefix, vsapi, d->mvbwGeometry);\n'
+              '            const bool diagVectorsUsable = vectorsB.IsUsable(d->thscd1, d->thscd2) && vectorsF.IsUsable(d->thscd1, d->thscd2);\n'
+              '            if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("vectors_load", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n\n'
+              '            if (diagVectorsUsable) {',
+              "motion vectors phase")
+
+          replace_once(
+              '                FramePyramid src(vsapi->getFrameFilter(nleft, d->super, frameCtx), 1, d->prefix, vsapi, d->superGeometry);',
+              '                diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
+              '                FramePyramid src(vsapi->getFrameFilter(nleft, d->super, frameCtx), 1, d->prefix, vsapi, d->superGeometry);',
+              "frame pyramid phase start")
+
+          replace_once(
+              '                SetFpsDuration(dst, d->vi.fpsNum, d->vi.fpsDen, vsapi);\n\n                auto SmallB = vectorsB.MakeSmallVectorMasks();',
+              '                SetFpsDuration(dst, d->vi.fpsNum, d->vi.fpsDen, vsapi);\n'
+              '                if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("frame_setup", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n\n'
+              '                diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
+              '                auto SmallB = vectorsB.MakeSmallVectorMasks();',
+              "frame pyramid phase end")
+
+          replace_once(
+              '                auto MaskSmallF = vectorsF.MakeVectorOcclusionMask<uint16_t>(d->ml, 1.0f, time256, true);\n\n'
+              '                auto tmp = MaskResizer::GetTmpBuffer(std::max(d->maskResizerFull.tmpSize, d->maskResizerSubSampled.tmpSize));',
+              '                auto MaskSmallF = vectorsF.MakeVectorOcclusionMask<uint16_t>(d->ml, 1.0f, time256, true);\n'
+              '                if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("base_masks", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n\n'
+              '                diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
+              '                auto tmp = MaskResizer::GetTmpBuffer(std::max(d->maskResizerFull.tmpSize, d->maskResizerSubSampled.tmpSize));',
+              "base masks phase")
+
+          replace_once(
+              '                auto bufSmallBY = MaskResizer::MakeBufferPair(SmallB->VYSmallY, SmallB->pitchVSmallY, dstTileYB.get());\n\n'
+              '                MotionBlockPyramid vectorsFF(d->extraMask ? vsapi->getFrameFilter(nleft, d->mvfw, frameCtx) : nullptr, 1, d->prefix, vsapi, d->mvfwGeometry);',
+              '                auto bufSmallBY = MaskResizer::MakeBufferPair(SmallB->VYSmallY, SmallB->pitchVSmallY, dstTileYB.get());\n'
+              '                if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("tile_buffers", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n\n'
+              '                diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
+              '                MotionBlockPyramid vectorsFF(d->extraMask ? vsapi->getFrameFilter(nleft, d->mvfw, frameCtx) : nullptr, 1, d->prefix, vsapi, d->mvfwGeometry);',
+              "tile buffers phase")
+
+          replace_once(
+              '                MotionBlockPyramid vectorsBB(d->extraMask ? vsapi->getFrameFilter(nright, d->mvbw, frameCtx) : nullptr, 1, d->prefix, vsapi, d->mvbwGeometry);\n\n'
+              '                if (d->extraMask && vectorsBB.IsUsable(d->thscd1, d->thscd2) && vectorsFF.IsUsable(d->thscd1, d->thscd2)) {',
+              '                MotionBlockPyramid vectorsBB(d->extraMask ? vsapi->getFrameFilter(nright, d->mvbw, frameCtx) : nullptr, 1, d->prefix, vsapi, d->mvbwGeometry);\n'
+              '                const bool diagExtraVectorsUsable = d->extraMask && vectorsBB.IsUsable(d->thscd1, d->thscd2) && vectorsFF.IsUsable(d->thscd1, d->thscd2);\n'
+              '                if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("extra_vectors", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n\n'
+              '                if (diagExtraVectorsUsable) {',
+              "extra vectors phase")
+
+          replace_once(
+              '                    auto bufSmallBBY = MaskResizer::MakeBufferPair(SmallBB->VYSmallY, SmallBB->pitchVSmallY, dstTileYBB.get());\n\n'
+              '                    ptrdiff_t dstStrideY = vsapi->getStride(dst, 0);',
+              '                    auto bufSmallBBY = MaskResizer::MakeBufferPair(SmallBB->VYSmallY, SmallBB->pitchVSmallY, dstTileYBB.get());\n'
+              '                    if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("extra_masks", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n\n'
+              '                    diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
+              '                    ptrdiff_t dstStrideY = vsapi->getStride(dst, 0);',
+              "extra masks phase")
+
+          replace_once(
+              '                    if (d->vi.format.numPlanes == 3) {\n'
+              '                        SmallF->AdjustSmallVectorMaskSubSampling(vectorsF.nBlkX, vectorsF.nBlkY, d->vi.format.subSamplingW, d->vi.format.subSamplingH);',
+              '                    if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("luma_loop_extra", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n\n'
+              '                    if (d->vi.format.numPlanes == 3) {\n'
+              '                        diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
+              '                        SmallF->AdjustSmallVectorMaskSubSampling(vectorsF.nBlkX, vectorsF.nBlkY, d->vi.format.subSamplingW, d->vi.format.subSamplingH);',
+              "extra luma phase end")
+
+          replace_once(
+              '                        }\n'
+              '                    }\n'
+              '                } else { // old method without extra frames',
+              '                        }\n'
+              '                        if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("chroma_loop_extra", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n'
+              '                    }\n'
+              '                } else { // old method without extra frames',
+              "extra chroma phase end")
+
+          replace_once(
+              '                } else { // old method without extra frames\n'
+              '                    ptrdiff_t dstStrideY = vsapi->getStride(dst, 0);',
+              '                } else { // old method without extra frames\n'
+              '                    diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
+              '                    ptrdiff_t dstStrideY = vsapi->getStride(dst, 0);',
+              "standard luma phase start")
+
+          replace_once(
+              '                    }\n\n'
+              '                    if (d->vi.format.numPlanes == 3) {\n'
+              '                        SmallF->AdjustSmallVectorMaskSubSampling(vectorsF.nBlkX, vectorsF.nBlkY, d->vi.format.subSamplingW, d->vi.format.subSamplingH);',
+              '                    }\n'
+              '                    if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("luma_loop_standard", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n\n'
+              '                    if (d->vi.format.numPlanes == 3) {\n'
+              '                        diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
+              '                        SmallF->AdjustSmallVectorMaskSubSampling(vectorsF.nBlkX, vectorsF.nBlkY, d->vi.format.subSamplingW, d->vi.format.subSamplingH);',
+              "standard luma phase end")
+
+          replace_once(
+              '                        }\n'
+              '                    }\n'
+              '                }\n\n'
+              '                return dst;',
+              '                        }\n'
+              '                        if (diagFlowTarget) MvuFrameTimingDiag::LogPhase("chroma_loop_standard", n, d->deltaFrame, MvuFrameTimingDiag::ElapsedUs(diagPhaseStart));\n'
+              '                    }\n'
+              '                }\n\n'
+              '                return dst;',
+              "standard chroma phase end")
+
+          p.write_text(s, encoding="utf-8")
+          print("Added FlowFPS internal phase timers for vectors, frame setup, masks, and luma/chroma loops.")
 
           print("Diagnostic windows: Analyse/Super frames 1430-1530; FlowFPS frames 2180-2280.")
           PY
@@ -315,6 +471,7 @@ jobs:
           - Analyse detail: delta direction (+1/-1).
           - Super detail: instance ID, to distinguish multiple Super nodes.
           - FlowFPS detail: delta frame setting.
+          - FlowFPSPhase records: vectors_load, frame_setup, base_masks, tile_buffers, extra_vectors, extra_masks, and luma/chroma loop times.
 
           The file is process-specific and is initialized on the first diagnostic record. Restore the backed-up DLL after diagnosis.
           """
