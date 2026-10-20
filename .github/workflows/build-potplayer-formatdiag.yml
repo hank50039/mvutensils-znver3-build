@@ -1,4 +1,4 @@
-name: Build PotPlayer VapourSynth diagnostic filter
+name: Build PotPlayer VapourSynth diagnostics with original queue behavior
 
 on:
   push:
@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Apply CAP-28 start-position diagnostics
+      - name: Apply format and Receive diagnostics only
         shell: pwsh
         run: |
           python .github/scripts/patch_vsfilter_diag.py avisynth_filter *> apply-patch.log
@@ -53,14 +53,8 @@ jobs:
           if ($src -match 'DYNAMIC_MT_FASTPATH applied' -or $src -match '_isInputMediaTypeChanged = !traceMetadataOnlyCandidate') {
             throw "Unsafe BT.709 metadata-only fast path must remain disabled; preserve normal media-type reconfiguration."
           }
-          if ($frame -notmatch 'MAX_PENDING_OUTPUT_FRAMES = 28') {
-            throw "Cap-28 source marker is missing."
-          }
-          if ($frame -notmatch 'CAP28DIAG_RESET' -or $frame -notmatch 'CAP28DIAG_THROTTLE') {
-            throw "CAP-28 sparse start-position markers are missing."
-          }
-          if ($frame -match 'CAP28DIAG_DELIVER') {
-            throw "Per-frame CAP28 diagnostic logging must remain disabled."
+          if ($frame -match 'MAX_PENDING_OUTPUT_FRAMES|CAP28DIAG_|CAP28') {
+            throw "FrameHandler must preserve upstream queue/request/delivery behavior; no CAP28 patch is allowed."
           }
           $dllCandidates = Get-ChildItem avisynth_filter -Recurse -File -Filter *.ax |
             Where-Object { $_.FullName -match '[\\/]x64[\\/]Release[\\/]' }
@@ -79,14 +73,13 @@ jobs:
             "Source commit: a07ccda967261832233185f1e1d9979ba12593c0"
             "Configuration: Release x64"
             "Output: vapoursynth_filter_x64.ax"
-            "Existing diagnostics: FORMAT_DIFF_*, RECVTRACE, DYNAMIC_MT"
+            "Diagnostics: FORMAT_DIFF_*, RECVTRACE, DYNAMIC_MT"
             "BT.709 metadata-only fast path: disabled; normal media-type reconfiguration preserved"
-            "Metadata-only classification remains diagnostic-only"
-            "Output request cap: 28 (unchanged)"
-            "New sparse CAP28 diagnostics: CAP28DIAG_RESET and CAP28DIAG_THROTTLE"
-            "Per-frame delivery timing instrumentation is intentionally disabled to minimize overhead"
+            "VapourSynth frame_handler.cpp and frame_handler.h: unmodified upstream"
+            "Output queue/request/callback/delivery/reset behavior: unmodified upstream"
+            "No CAP28 queue limit or CAP28 diagnostic marker is added"
             "Existing per-frame filter logs remain available for offline timing correlation"
-            "Purpose: compare seek/start positions around the same target media timestamp"
+            "Purpose: collect format/Receive traces while preserving original interpolation flow"
             "This remains a diagnostic build; playback performance is not claimed."
           ) | Set-Content dist/BUILD-INFO.txt
           Get-FileHash (Join-Path dist $dll.Name) -Algorithm SHA256 | Format-List | Out-String | Set-Content dist/SHA256.txt
@@ -94,7 +87,7 @@ jobs:
       - name: Upload compiled filter
         uses: actions/upload-artifact@v4
         with:
-          name: potplayer-vapoursynth-cap28-formatdiag-x64
+          name: potplayer-vapoursynth-formatdiag-original-queue-x64
           path: dist/*
           if-no-files-found: error
           retention-days: 30
@@ -103,7 +96,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: potplayer-vapoursynth-build-debug-log
+          name: potplayer-vapoursynth-original-queue-build-debug-log
           path: |
             apply-patch.log
             avisynth_filter/x64/Release/*.log
