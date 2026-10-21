@@ -366,7 +366,25 @@ request_replacement = '''    while (_nextOutputFrameNb <= maxRequestOutputFrameN
             _outputFrames.emplace(_nextOutputFrameNb, nullptr);
             _outputRequestTimes.emplace(_nextOutputFrameNb, std::chrono::steady_clock::now());
         }
-        AVSF_VPS_API->getFrameAsync(_nextOutputFrameNb, MainFrameServer::GetInstance().GetScriptClip(), VpsGetFrameCallback, this);'''
+        const int requestedOutputFrameNb = _nextOutputFrameNb;
+        {
+            const std::unique_lock uniqueOutputLock(_outputMutex);
+            if (_outputFrames.size() >= MAX_PENDING_OUTPUT_FRAMES) {
+                break;
+            }
+            _outputFrames.emplace(requestedOutputFrameNb, nullptr);
+            _outputRequestTimes.emplace(requestedOutputFrameNb, std::chrono::steady_clock::now());
+        }
+        const auto getFrameAsyncStart = std::chrono::steady_clock::now();
+        AVSF_VPS_API->getFrameAsync(requestedOutputFrameNb, MainFrameServer::GetInstance().GetScriptClip(), VpsGetFrameCallback, this);
+        const long long getFrameAsyncUs = static_cast<long long>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - getFrameAsyncStart).count());
+        if (getFrameAsyncUs >= 5000) {
+            Environment::GetInstance().Log(
+                L"STARTPOINTDIAG OutputFrame_submit frame %d getframeasync_us %lld",
+                requestedOutputFrameNb, getFrameAsyncUs);
+        }'''
 if s.count(request_anchor) != 1:
     raise SystemExit("Could not uniquely locate async output request loop; refusing to patch")
 s = s.replace(request_anchor, request_replacement, 1)
@@ -387,6 +405,7 @@ callback_anchor = '''    FrameHandler *frameHandler = static_cast<FrameHandler *
 callback_replacement = '''    FrameHandler *frameHandler = static_cast<FrameHandler *>(userData);
     const auto callbackEntry = std::chrono::steady_clock::now();
     long long requestToCallbackUs = -1;
+    const auto callbackLockBegin = std::chrono::steady_clock::now();
     {
         const std::unique_lock uniqueOutputLock(frameHandler->_outputMutex);
         if (const auto requestIter = frameHandler->_outputRequestTimes.find(n);
@@ -395,6 +414,14 @@ callback_replacement = '''    FrameHandler *frameHandler = static_cast<FrameHand
                 std::chrono::duration_cast<std::chrono::microseconds>(callbackEntry - requestIter->second).count());
             frameHandler->_outputRequestTimes.erase(requestIter);
         }
+    }
+    const long long callbackLockLookupUs = static_cast<long long>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - callbackLockBegin).count());
+    if (callbackLockLookupUs >= 5000) {
+        Environment::GetInstance().Log(
+            L"STARTPOINTDIAG OutputFrame_callback_lock frame %d lock_lookup_us %lld",
+            n, callbackLockLookupUs);
     }
     if (requestToCallbackUs >= 20000 || f == nullptr) {
         Environment::GetInstance().Log(
