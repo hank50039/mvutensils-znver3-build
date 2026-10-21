@@ -844,6 +844,218 @@ if any(token in release_cpp for token in (
 )):
     raise SystemExit("EOFWatch file sink was not completely disabled")
 
+
+# Start/seek clock trace: RAM-only bounded capture during the initial ~4.5 s
+# of each play/seek epoch. A text log is written only at Flush/EndFlush, NOT
+# on the timing-sensitive output path. The proven EOS/BT709/CAP28 logic stays.
+def probe_replace(source: str, old: str, new: str, label: str) -> str:
+    matches = source.count(old)
+    if matches != 1:
+        raise SystemExit(f"StartSeek {label}: expected one anchor, found {matches}")
+    return source.replace(old, new, 1)
+
+trace_cpp = frame_cpp.read_text(encoding="utf-8")
+trace_cpp = probe_replace(trace_cpp,
+    '''#include "frame_handler.h"
+
+#include <cstdarg>
+#include <cstdio>
+#include <cwchar>''',
+    '''#include "frame_handler.h"
+
+#include <array>
+#include <atomic>
+#include <cstdarg>
+#include <cstdio>
+#include <cwchar>''',
+    "Add bounded recorder headers")
+
+trace_cpp = probe_replace(trace_cpp,
+    '''// Clean production release: no diagnostic file output.
+inline auto EofWatch(bool, const wchar_t*, ...) noexcept -> void {}''',
+    r'''// Clean EOF foundation: legacy EOFWatch stays disabled.
+inline auto EofWatch(bool, const wchar_t*, ...) noexcept -> void {}
+
+// START/SEEK PROBE - fixed-size RAM recording with no per-frame file I/O.
+// Each slot has its own release/acquire ready flag so callback threads never
+// race the later flush read. Flush is called only after worker latch.
+constexpr unsigned STARTSEEK_MAX_RECORDS = 6000;
+struct StartSeekEvent {
+    std::atomic<bool> ready{false};
+    const char *tag{};
+    long long tick{};
+    long long pts{};
+    long long clock{};
+    long long aux{};
+    unsigned tid{};
+    int frame{};
+};
+std::array<StartSeekEvent, STARTSEEK_MAX_RECORDS> g_startSeekEvents{};
+std::atomic<unsigned> g_startSeekPos{0};
+unsigned g_startSeekEpoch = 0;
+
+auto StartSeekProbe(const char *tag, int frame, long long pts = -1,
+                    long long clock = -1, long long aux = -1) noexcept -> void {
+    const unsigned at = g_startSeekPos.fetch_add(1, std::memory_order_relaxed);
+    if (at >= STARTSEEK_MAX_RECORDS) return;
+    LARGE_INTEGER t{};
+    QueryPerformanceCounter(&t);
+    auto &item = g_startSeekEvents[at];
+    item.tag = tag;
+    item.frame = frame;
+    item.pts = pts;
+    item.clock = clock;
+    item.aux = aux;
+    item.tick = t.QuadPart;
+    item.tid = GetCurrentThreadId();
+    item.ready.store(true, std::memory_order_release);
+}
+
+auto StartSeekDump() noexcept -> void {
+    const unsigned n = std::min(g_startSeekPos.load(std::memory_order_acquire),
+                                STARTSEEK_MAX_RECORDS);
+    if (!n) return;
+    if (CreateDirectoryW(L"D:\\SynthFilters", nullptr) ||
+        GetLastError() == ERROR_ALREADY_EXISTS) {
+        wchar_t path[MAX_PATH]{};
+        swprintf_s(path, L"D:\\SynthFilters\\VapourSynth_StartSeek_%lu.txt",
+                   GetCurrentProcessId());
+        FILE *fp = nullptr;
+        if (_wfopen_s(&fp, path, L"a") == 0 && fp != nullptr) {
+            LARGE_INTEGER freq{};
+            QueryPerformanceFrequency(&freq);
+            fwprintf_s(fp, L"STARTSEEK_EPOCH=%u count=%u qpc_freq=%lld pid=%lu (pts/clock 100ns; aux is event-specific)\n",
+                       ++g_startSeekEpoch, n, static_cast<long long>(freq.QuadPart),
+                       GetCurrentProcessId());
+            for (unsigned i = 0; i < n; ++i) {
+                const auto &e = g_startSeekEvents[i];
+                if (e.ready.load(std::memory_order_acquire)) {
+                    fwprintf_s(fp, L"qpc=%lld tid=%u event=%hs frame=%d pts=%lld clock=%lld aux=%lld\n",
+                               e.tick, e.tid, e.tag, e.frame,
+                               e.pts, e.clock, e.aux);
+                }
+            }
+            fclose(fp);
+        }
+    }
+    for (unsigned i = 0; i < n; ++i) {
+        g_startSeekEvents[i].ready.store(false, std::memory_order_relaxed);
+    }
+    g_startSeekPos.store(0, std::memory_order_release);
+}''',
+    "Insert RAM recorder; leave EOF production behavior intact")
+
+trace_cpp = probe_replace(trace_cpp,
+    '''    _addInputSampleCv.wait(_filter.m_csReceive, [this]() -> bool {''',
+    '''    LARGE_INTEGER startSeekWaitBegin{};
+    QueryPerformanceCounter(&startSeekWaitBegin);
+    _addInputSampleCv.wait(_filter.m_csReceive, [this]() -> bool {''',
+    "Timestamp receive-buffer wait begin")
+trace_cpp = probe_replace(trace_cpp,
+    '''    if (_isFlushing || _isStopping) {
+        Environment::GetInstance().Log(L"Reject input sample due to flush or stop");''',
+    '''    if (_nextSourceFrameNb < 420) {
+        LARGE_INTEGER startSeekWaitEnd{}, startSeekFreq{};
+        QueryPerformanceCounter(&startSeekWaitEnd);
+        QueryPerformanceFrequency(&startSeekFreq);
+        const auto waitUs = static_cast<long long>(
+            (startSeekWaitEnd.QuadPart - startSeekWaitBegin.QuadPart) * 1000000LL / startSeekFreq.QuadPart);
+        if (waitUs > 8000) StartSeekProbe("INPUT_WAIT_US", _nextSourceFrameNb, waitUs);
+    }
+    if (_isFlushing || _isStopping) {
+        Environment::GetInstance().Log(L"Reject input sample due to flush or stop");''',
+    "Log significant receive wait")
+
+trace_cpp = probe_replace(trace_cpp,
+    '''    {
+        const std::shared_lock sharedSourceLock(_sourceMutex);
+
+        // since the key of _sourceFrames''',
+    '''    if (_nextSourceFrameNb < 115 || (_nextSourceFrameNb < 420 && _nextSourceFrameNb % 15 == 0)) {
+        CRefTime startSeekStreamClock;
+        const HRESULT startSeekClockHr = _filter.StreamTime(startSeekStreamClock);
+        StartSeekProbe("SOURCE_INPUT", _nextSourceFrameNb, inputSampleStartTime,
+                       SUCCEEDED(startSeekClockHr) ? startSeekStreamClock.GetUnits() : -1,
+                       inputSampleStopTime);
+    }
+    {
+        const std::shared_lock sharedSourceLock(_sourceMutex);
+
+        // since the key of _sourceFrames''',
+    "Sample original source PTS vs graph clock")
+trace_cpp = probe_replace(trace_cpp,
+    '''    } else if (_nextSourceFrameNb == Environment::GetInstance().GetInitialSrcBuffer()) {
+        MainFrameServer::GetInstance().ReloadScript(_filter.m_pInput->CurrentMediaType(), true);
+    }''',
+    '''    } else if (_nextSourceFrameNb == Environment::GetInstance().GetInitialSrcBuffer()) {
+        StartSeekProbe("MAIN_SCRIPT_START", _nextSourceFrameNb);
+        MainFrameServer::GetInstance().ReloadScript(_filter.m_pInput->CurrentMediaType(), true);
+        StartSeekProbe("MAIN_SCRIPT_READY", _nextSourceFrameNb);
+    }''',
+    "Record startup script activation interval")
+trace_cpp = probe_replace(trace_cpp,
+    '''        EofWatch(false, L"OUTPUT_REQUEST frame=%d", n);
+        AVSF_VPS_API->getFrameAsync(n,''',
+    '''        if (n < 420) StartSeekProbe("OUTPUT_REQUEST", n);
+        EofWatch(false, L"OUTPUT_REQUEST frame=%d", n);
+        AVSF_VPS_API->getFrameAsync(n,''',
+    "Record output request lead-in")
+
+trace_cpp = probe_replace(trace_cpp,
+    '''    EofWatch(false, L"OUTPUT_CALLBACK frame=%d success=%d", n, f != nullptr);
+
+    frameHandler->_flushOutputSampleCv.notify_all();''',
+    '''    if (n < 420) StartSeekProbe("OUTPUT_READY", n, -1, -1, f != nullptr);
+    EofWatch(false, L"OUTPUT_CALLBACK frame=%d success=%d", n, f != nullptr);
+
+    frameHandler->_flushOutputSampleCv.notify_all();''',
+    "Record async completion")
+
+trace_cpp = probe_replace(trace_cpp,
+    '''    _nextOutputFrameStartTime = frameStopTime;
+    EofWatch(false, L"OUTPUT_PTS''',
+    '''    _nextOutputFrameStartTime = frameStopTime;
+    if (outputFrameNb < 420) StartSeekProbe("OUTPUT_PTS", outputFrameNb,
+                                            frameStartTime, frameStopTime, sourceFrameNb);
+    EofWatch(false, L"OUTPUT_PTS''',
+    "Measure generated output PTS")
+
+trace_cpp = probe_replace(trace_cpp,
+    '''            _filter.m_pOutput->Deliver(outSample);
+            RefreshDeliveryFrameRates(iter->first);''',
+    '''            if (iter->first < 420) {
+                REFERENCE_TIME ptsStart = -1, ptsStop = -1;
+                outSample->GetTime(&ptsStart, &ptsStop);
+                CRefTime graphStreamTime;
+                const HRESULT clockHr = _filter.StreamTime(graphStreamTime);
+                StartSeekProbe("DELIVER_BEGIN", iter->first, ptsStart,
+                               SUCCEEDED(clockHr) ? graphStreamTime.GetUnits() : -1,
+                               sourceFrameNb);
+            }
+            const HRESULT deliverHr = _filter.m_pOutput->Deliver(outSample);
+            if (iter->first < 420) {
+                CRefTime graphStreamTime;
+                const HRESULT clockHr = _filter.StreamTime(graphStreamTime);
+                StartSeekProbe("DELIVER_END", iter->first, -1,
+                               SUCCEEDED(clockHr) ? graphStreamTime.GetUnits() : -1,
+                               static_cast<long long>(deliverHr));
+            }
+            RefreshDeliveryFrameRates(iter->first);''',
+    "Track renderer handoff and stream-clock lateness")
+
+trace_cpp = probe_replace(trace_cpp,
+    '''    _outputFrames.clear();
+
+    ResetInput();''',
+    '''    _outputFrames.clear();
+
+    StartSeekProbe("FLUSH_CAPTURE", _nextDeliveryFrameNb, _nextSourceFrameNb,
+                   _nextOutputFrameNb);
+    StartSeekDump();
+    ResetInput();''',
+    "Dump trace at safe latched flush boundary")
+frame_cpp.write_text(trace_cpp, encoding="utf-8", newline="")
+
 # Regression fix after detailed EOF logs confirmed the final frame 203 was
 # present, but SourceGetFrame(203/204/205) waited until shutdown. VSAPI's
 # mapNumElements() returns -1 when a duration key does not exist. Earlier code
