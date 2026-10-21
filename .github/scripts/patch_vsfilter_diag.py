@@ -108,6 +108,32 @@ replace_once(
     "Receive skip-only-reconfigure path"
 )
 
+# SOURCE-CONTINUITY REGRESSION FIX: A/B trace at 4K/90fps established
+# RAW_RECEIVE is 60fps-continuous, whereas the inherited DirectShow
+# CVideoTransformFilter::ShouldSkipFrame() dropped 44/63 source frames in the
+# first 260 decoded samples. That helper stays in a "skip until next keyframe"
+# mode under renderer lateness, despite this being an interpolating Filter.
+# The script indexes inputs as contiguous source frames and generates output
+# timestamps from a fixed nominal FPS. Skipping decoder samples therefore
+# creates a false source PTS jump and severe A/V drift.
+# Preserve EVERY decoded source sample in VapourSynth only. Keep unchanged
+# inherited skipping for the AviSynth build. No frames are duplicated or
+# re-timestamped; actual input PTS stays intact.
+replace_once(
+    filter_cpp,
+    '''    if (ShouldSkipFrame(pSample)) {
+        m_bSampleSkipped = TRUE;
+        return S_OK;
+    }''',
+    '''#ifndef AVSF_VAPOURSYNTH
+    if (ShouldSkipFrame(pSample)) {
+        m_bSampleSkipped = TRUE;
+        return S_OK;
+    }
+#endif''',
+    "Prevent inherited quality-control drop of VapourSynth source samples"
+)
+
 # CAP28: keep the proved upper bound and original request sequence, but
 # remove every diagnostic timestamp, map and callback instrumentation.
 s = frame_cpp.read_text(encoding="utf-8-sig")
@@ -873,6 +899,7 @@ modified = {
 }
 assert modified["filter"].count("IsOnlyVideoInfo2ControlFlagsChanged(") == 3
 assert "_isInputMediaTypeChanged = !metadataOnlyBt709" in modified["filter"]
+assert "#ifndef AVSF_VAPOURSYNTH\n    if (ShouldSkipFrame(pSample))" in modified["filter"]
 assert "MAX_PENDING_OUTPUT_FRAMES = 28" in modified["frame"]
 assert modified["frame"].count("getFrameAsync(") == 1
 assert "RequestPendingOutputFrames();" in modified["frame"]
@@ -899,4 +926,4 @@ for tag in ("STARTPOINTDIAG", "RECVTRACE", "FORMAT_DIFF", "DYNAMIC_MT_FASTPATH",
     if any(tag in x for x in modified.values()):
         raise SystemExit("Unexpected diagnostic marker remains: " + tag)
 
-print("Release verified: EOF duration fix, both BT.709 Fast Paths and CAP28 kept; EOFWatch file sink disabled, no diagnostic logs.")
+print("A/V continuity fix: preserve all LAV-decoded video samples for VapourSynth, keep AviSynth unchanged, BT709 dual fastpaths + CAP28 + EOF fixes intact, diagnostic logs disabled.")
