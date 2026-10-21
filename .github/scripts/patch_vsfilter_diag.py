@@ -375,8 +375,8 @@ s = s.replace(request_anchor, request_replacement, 1)
 # the async request timestamp and callback latency; it does not change scheduling,
 # queue capacity, delivery order, or the VapourSynth frame-generation request.
 frame_header = root / "vapoursynth_filter/src/frame_handler.h"
-header_anchor = "    std::map<int, AutoReleaseVSFrame> _outputFrames;\\n"
-header_replacement = header_anchor + "    std::map<int, std::chrono::steady_clock::time_point> _outputRequestTimes;\\n"
+header_anchor = "    std::map<int, AutoReleaseVSFrame> _outputFrames;\n"
+header_replacement = header_anchor + "    std::map<int, std::chrono::steady_clock::time_point> _outputRequestTimes;\n"
 h = frame_header.read_text(encoding="utf-8-sig")
 if h.count(header_anchor) != 1:
     raise SystemExit("Could not uniquely locate output frame map in frame_handler.h")
