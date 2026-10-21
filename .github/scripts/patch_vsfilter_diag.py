@@ -323,13 +323,15 @@ wait_end_replacement = '''    });
     const long long addInputSampleWaitUs = static_cast<long long>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - addInputSampleWaitBegin).count());
+    LARGE_INTEGER inputWaitEndQpc{};
+    QueryPerformanceCounter(&inputWaitEndQpc);
     if (addInputSampleWaitUs >= 20000 || _filter._isInputMediaTypeChanged || _filter._needReloadScript) {
         REFERENCE_TIME diagInputStart = 0;
         REFERENCE_TIME diagInputStop = 0;
         const HRESULT diagInputTimeHr = inputSample->GetTime(&diagInputStart, &diagInputStop);
         Environment::GetInstance().Log(
-            L"STARTPOINTDIAG AddInputSample_wait wait_us %lld input_time_hr 0x%08lX input_start %lld input_stop %lld next_source %d last_used_source %d extra_src_buffer %d input_mt_changed %d need_reload %d flushing %d stopping %d",
-            addInputSampleWaitUs, static_cast<unsigned long>(diagInputTimeHr),
+            L"STARTPOINTDIAG AddInputSample_wait wait_us %lld wait_end_qpc %lld input_time_hr 0x%08lX input_start %lld input_stop %lld next_source %d last_used_source %d extra_src_buffer %d input_mt_changed %d need_reload %d flushing %d stopping %d",
+            addInputSampleWaitUs, static_cast<long long>(inputWaitEndQpc.QuadPart), static_cast<unsigned long>(diagInputTimeHr),
             static_cast<long long>(diagInputStart), static_cast<long long>(diagInputStop),
             _nextSourceFrameNb, static_cast<int>(_lastUsedSourceFrameNb.load()), _extraSrcBuffer,
             _filter._isInputMediaTypeChanged, _filter._needReloadScript,
@@ -369,6 +371,8 @@ request_replacement = '''    while (_nextOutputFrameNb <= maxRequestOutputFrameN
             _outputRequestTimes.emplace(requestedOutputFrameNb, frameRequestTime);
         }
         const auto getFrameAsyncStart = std::chrono::steady_clock::now();
+        LARGE_INTEGER submitQpc{};
+        QueryPerformanceCounter(&submitQpc);
         AVSF_VPS_API->getFrameAsync(requestedOutputFrameNb, MainFrameServer::GetInstance().GetScriptClip(), VpsGetFrameCallback, this);
         const long long getFrameAsyncUs = static_cast<long long>(
             std::chrono::duration_cast<std::chrono::microseconds>(
@@ -380,8 +384,8 @@ request_replacement = '''    while (_nextOutputFrameNb <= maxRequestOutputFrameN
             const auto submitTNs = static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                 getFrameAsyncStart.time_since_epoch()).count());
             Environment::GetInstance().Log(
-                L"STARTPOINTDIAG OutputFrame_submit frame %d getframeasync_us %lld submit_t_ns %lld",
-                requestedOutputFrameNb, getFrameAsyncUs, submitTNs);
+                L"STARTPOINTDIAG OutputFrame_submit frame %d getframeasync_us %lld submit_t_ns %lld submit_qpc %lld",
+                requestedOutputFrameNb, getFrameAsyncUs, submitTNs, static_cast<long long>(submitQpc.QuadPart));
         }'''
 if s.count(request_anchor) != 1:
     raise SystemExit("Could not uniquely locate async output request loop; refusing to patch")
@@ -402,6 +406,8 @@ callback_anchor = '''    FrameHandler *frameHandler = static_cast<FrameHandler *
     Environment::GetInstance().Log(L"Output frame %6d is ready, output queue size %2zd", n, frameHandler->_outputFrames.size());'''
 callback_replacement = '''    FrameHandler *frameHandler = static_cast<FrameHandler *>(userData);
     const auto callbackEntry = std::chrono::steady_clock::now();
+    LARGE_INTEGER callbackQpc{};
+    QueryPerformanceCounter(&callbackQpc);
     long long requestToCallbackUs = -1;
     long long requestTNs = -1;
     const auto callbackTNs = static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(callbackEntry.time_since_epoch()).count());
@@ -426,8 +432,8 @@ callback_replacement = '''    FrameHandler *frameHandler = static_cast<FrameHand
     }
     if (requestToCallbackUs >= 20000 || f == nullptr || (n >= 2120 && n <= 2260)) {
         Environment::GetInstance().Log(
-            L"STARTPOINTDIAG OutputFrame_ready frame %d request_to_callback_us %lld failed %d request_t_ns %lld callback_t_ns %lld",
-            n, requestToCallbackUs, f == nullptr, requestTNs, callbackTNs);
+            L"STARTPOINTDIAG OutputFrame_ready frame %d request_to_callback_us %lld failed %d request_t_ns %lld callback_t_ns %lld callback_qpc %lld",
+            n, requestToCallbackUs, f == nullptr, requestTNs, callbackTNs, static_cast<long long>(callbackQpc.QuadPart));
     }
     Environment::GetInstance().Log(L"Output frame %6d is ready, output queue size %2zd", n, frameHandler->_outputFrames.size());'''
 if s.count(callback_anchor) != 1:
