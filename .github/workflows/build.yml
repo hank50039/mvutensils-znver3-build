@@ -2,7 +2,7 @@ name: Build verified Zen 3 AVX2 tuning
 
 on:
   push:
-    branches: [main, mvu-frame-stage-diag-20261020, experiment/mvu-startpoint-stage-20261021]
+    branches: [main, mvu-frame-stage-diag-20261020, experiment/mvu-startpoint-stage-20261021, experiment/mvu-burst1400-stage-20261021]
   workflow_dispatch:
 
 permissions:
@@ -73,9 +73,9 @@ jobs:
 
           inline bool IsTarget(const char *stage, int n) noexcept {
               if (std::strcmp(stage, "FlowFPS") == 0)
-                  return n >= 2100 && n <= 2300;
+                  return n >= 1370 && n <= 1580;
               if (std::strcmp(stage, "Analyse") == 0 || std::strcmp(stage, "Super") == 0)
-                  return n >= 1350 && n <= 1550;
+                  return n >= 900 && n <= 1080;
               return false;
           }
 
@@ -469,7 +469,7 @@ jobs:
           p.write_text(s, encoding="utf-8")
           print("Added FlowFPS internal phase timers for vectors, frame setup, masks, and luma/chroma loops.")
 
-          print("Diagnostic windows: Analyse/Super frames 1350-1550; FlowFPS frames 2100-2300.")
+          print("Diagnostic windows: Analyse/Super frames 900-1080; FlowFPS frames 1370-1580.")
           PY
 
       - name: Apply and commit Zen 3 tuning to AVX2 build variant only
@@ -571,8 +571,8 @@ jobs:
           4. Close PotPlayer and find D:\\MVtools\\MVUtensils_FrameTimingDiag_<PID>.txt, then share that log.
 
           Recorded frame windows:
-          - Analyse and Super: frames 1350 through 1550.
-          - FlowFPS: frames 2100 through 2300.
+          - Analyse and Super: frames 900 through 1080.
+          - FlowFPS: frames 1370 through 1580.
           - qpc_ticks: QueryPerformanceCounter clock shared with the companion Filter diagnostic (stage end).
 
           Log fields:
@@ -587,7 +587,7 @@ jobs:
           """
           readme = "\n".join(line.strip() for line in readme.splitlines()).strip() + "\n"
 
-          out = root / "MVUtensils-FrameTimingDiag-AVX2.zip"
+          out = root / "MVUtensils-Burst1400-FrameTimingDiag-AVX2.zip"
           with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as z:
               z.write(dlls[0], "mvutensils.avx2.dll")
               z.writestr("README.txt", readme)
@@ -597,7 +597,7 @@ jobs:
       - name: Upload verified Windows build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: mvutensils-znver3-windows-verified
+          name: mvutensils-burst1400-znver3-diagnostic-x64
           path: dist/*
           if-no-files-found: error
           retention-days: 14
