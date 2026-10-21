@@ -65,7 +65,7 @@ jobs:
           if ($frame -notmatch 'MAX_PENDING_OUTPUT_FRAMES = 28' -or $frame -notmatch '_outputFrames.size\(\) >= MAX_PENDING_OUTPUT_FRAMES') {
             throw "CAP28 bound must be retained."
           }
-          if ($frame -notmatch 'void FrameHandler::RequestPendingOutputFrames\(\)' -or $frame -notmatch '_maxRequestOutputFrameNb' -or $frame -notmatch 'RequestPendingOutputFrames\(\);' -or $header -notmatch 'auto RequestPendingOutputFrames\(\) -> void') {
+          if ($frame -notmatch 'auto FrameHandler::RequestPendingOutputFrames\(\) -> void' -or $frame -notmatch '_maxRequestOutputFrameNb' -or $frame -notmatch 'RequestPendingOutputFrames\(\);' -or $header -notmatch 'auto RequestPendingOutputFrames\(\) -> void') {
             throw "Automatic refill on frame delivery, especially after decoder EOS, is missing."
           }
           if ($frame -match 'while \(_nextOutputFrameNb <= maxRequestOutputFrameNb\)') {
