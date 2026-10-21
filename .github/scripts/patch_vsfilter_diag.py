@@ -273,7 +273,7 @@ replace_once(
     '''    int _maxRequestOutputFrameNb = -1;
     REFERENCE_TIME _nextOutputFrameStartTime;''',
     '''    int _maxRequestOutputFrameNb = -1;
-    bool _inputEosSeen = false;  // guarded by _outputMutex
+    std::atomic<bool> _inputEosSeen = false;  // read by source frame waiters
     bool _eosForwarded = false;  // guarded by _outputMutex
     REFERENCE_TIME _nextOutputFrameStartTime;''',
     "End-of-stream state tracking"
@@ -282,6 +282,15 @@ replace_once(
     frame_cpp,
     '''auto FrameHandler::RequestPendingOutputFrames() -> void {''',
     '''auto FrameHandler::SignalInputEndOfStream() -> void {
+    // Normal startup triggers the main VapourSynth script only after the
+    // configured InitialSrcBuffer (100 here). When seeking into the final few
+    // seconds there may be fewer than 100 decoded source samples remaining.
+    // Without this short-tail startup the renderer gets EOS with zero frames.
+    if (_nextSourceFrameNb >= NUM_SRC_FRAMES_PER_PROCESSING &&
+        _nextSourceFrameNb < Environment::GetInstance().GetInitialSrcBuffer()) {
+        MainFrameServer::GetInstance().ReloadScript(_filter.m_pInput->CurrentMediaType(), true);
+    }
+
     // The final source frame never gets duration properties from a following
     // source frame. Derive a final duration from the previous source interval
     // (or the source's nominal duration), so any waiting FlowFPS requests
@@ -310,12 +319,26 @@ replace_once(
             }
         }
     }
-    _newSourceFrameCv.notify_all();
-
     {
         const std::unique_lock outputLock(_outputMutex);
-        _inputEosSeen = true;
+        // Schedule outputs through the last source frame's nominal
+        // presentation interval, rather than stopping one source frame early.
+        // Uses exactly the same time-ratio convention as AddInputSample().
+        if (_nextSourceFrameNb >= NUM_SRC_FRAMES_PER_PROCESSING) {
+            const REFERENCE_TIME srcDuration = MainFrameServer::GetInstance().GetSourceAvgFrameDuration();
+            const REFERENCE_TIME outDuration = MainFrameServer::GetInstance().GetScriptAvgFrameDuration();
+            if (srcDuration > 0 && outDuration > 0) {
+                const auto count = llMulDiv(static_cast<LONGLONG>(_nextSourceFrameNb),
+                                            srcDuration, outDuration, 0);
+                const int lastOutput = static_cast<int>(count - 1);
+                _maxRequestOutputFrameNb = std::max(_maxRequestOutputFrameNb, lastOutput);
+            }
+        }
+        _inputEosSeen.store(true, std::memory_order_release);
     }
+    // Wake any source callbacks blocked waiting for lookahead frames that
+    // the upstream decoder will never deliver.
+    _newSourceFrameCv.notify_all();
 
     // Continue draining the final eligible frames even though the decoder
     // will never call AddInputSample again.
@@ -368,6 +391,54 @@ replace_once(
     "Send downstream EOS only after worker has delivered the last output"
 )
 
+
+# A VapourSynth plugin may request a look-ahead source frame beyond the last
+# decoder frame. It is impossible for an unknown-length streaming source to
+# infer EOF until upstream EndOfStream(), so GetSourceFrame() MUST wake at EOS.
+# The look-ahead frame is then satisfied by repeating the final real frame;
+# no fabricated future pixel data or interleaved output outside the file.
+replace_once(
+    frame_cpp,
+    '''        iter = _sourceFrames.lower_bound(frameNb);
+        if (iter == _sourceFrames.end()) {
+            return false;
+        }
+
+        const VSMap *frameProps =''',
+    '''        iter = _sourceFrames.lower_bound(frameNb);
+        if (iter == _sourceFrames.end()) {
+            if (!_inputEosSeen.load(std::memory_order_acquire)) {
+                return false;
+            }
+            // Decoder has ended: forward references cannot ever arrive.
+            // Hold the actual last source image for motion-vector lookahead.
+            // Return dummy only for an empty/fully drained source.
+            if (_sourceFrames.empty()) {
+                return true;
+            }
+            iter = std::prev(_sourceFrames.end());
+        }
+
+        const VSMap *frameProps =''',
+    "Wake EOF lookahead source frame requests"
+)
+replace_once(
+    frame_cpp,
+    '''    if (_isFlushing) {
+        Environment::GetInstance().Log(L"Drain for frame %6d", frameNb);
+        return FrameServerCommon::GetInstance().CreateSourceDummyFrame(MainFrameServer::GetInstance().GetVsCore());
+    }
+
+    Environment::GetInstance().Log(L"Return source frame %6d", frameNb);''',
+    '''    if (_isFlushing || _sourceFrames.empty()) {
+        Environment::GetInstance().Log(L"Drain for frame %6d", frameNb);
+        return FrameServerCommon::GetInstance().CreateSourceDummyFrame(MainFrameServer::GetInstance().GetVsCore());
+    }
+
+    Environment::GetInstance().Log(L"Return source frame %6d", frameNb);''',
+    "Guard empty end-of-stream source while flushing"
+)
+
 # Disable the built-in logfile as well, even if a stale LogFile= entry
 # remains in the user's existing INI/registry settings. No settings are
 # changed and no runtime logfile is opened. Calls to Environment::Log
@@ -397,10 +468,13 @@ assert "RequestPendingOutputFrames();" in modified["frame"]
 assert "_maxRequestOutputFrameNb" in modified["frame"]
 assert "SignalInputEndOfStream()" in modified["frame"]
 assert "DeliverEndOfStreamIfDrained()" in modified["frame"]
+assert "_inputEosSeen.load(std::memory_order_acquire)" in modified["frame"]
+assert "_inputEosSeen.store(true, std::memory_order_release)" in modified["frame"]
+assert "_nextSourceFrameNb < Environment::GetInstance().GetInitialSrcBuffer()" in modified["frame"]
 assert "_outputRequestTimes" not in modified["frame"]
 assert "_wfsopen" not in modified["environment"]
 for tag in ("STARTPOINTDIAG", "RECVTRACE", "FORMAT_DIFF", "DYNAMIC_MT_FASTPATH", "DYNAMIC_MT_PRECHECK_FASTPATH", "CAP28DIAG"):
     if any(tag in x for x in modified.values()):
         raise SystemExit("Unexpected diagnostic marker remains: " + tag)
 
-print("Release patch complete: dual BT709 Fast Paths + CAP28 refill + correct async EOS + no runtime logs.")
+print("EOF patch: dual Fast Paths + CAP28 refill + last-source lookahead + short-tail script startup + bounded EOS; no runtime logs.")
