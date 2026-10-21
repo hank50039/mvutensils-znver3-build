@@ -310,9 +310,6 @@ wait_anchor = '''    HRESULT hr;
     _addInputSampleCv.wait(_filter.m_csReceive, [this]() -> bool {'''
 wait_replacement = '''    HRESULT hr;
     const auto addInputSampleWaitBegin = std::chrono::steady_clock::now();
-    REFERENCE_TIME diagInputStart = 0;
-    REFERENCE_TIME diagInputStop = 0;
-    const HRESULT diagInputTimeHr = inputSample->GetTime(&diagInputStart, &diagInputStop);
 
     _addInputSampleCv.wait(_filter.m_csReceive, [this]() -> bool {'''
 if s.count(wait_anchor) != 1:
@@ -327,6 +324,9 @@ wait_end_replacement = '''    });
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - addInputSampleWaitBegin).count());
     if (addInputSampleWaitUs >= 20000 || _filter._isInputMediaTypeChanged || _filter._needReloadScript) {
+        REFERENCE_TIME diagInputStart = 0;
+        REFERENCE_TIME diagInputStop = 0;
+        const HRESULT diagInputTimeHr = inputSample->GetTime(&diagInputStart, &diagInputStop);
         Environment::GetInstance().Log(
             L"STARTPOINTDIAG AddInputSample_wait wait_us %lld input_time_hr 0x%08lX input_start %lld input_stop %lld next_source %d last_used_source %d extra_src_buffer %d input_mt_changed %d need_reload %d flushing %d stopping %d",
             addInputSampleWaitUs, static_cast<unsigned long>(diagInputTimeHr),
