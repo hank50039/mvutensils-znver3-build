@@ -1,8 +1,8 @@
-name: Build startup seek QPC clock probe - EOF fixed dual BT709 CAP28
+name: Build raw upstream PTS gap diagnostic - EOF fixed dual BT709 CAP28
 
 on:
   push:
-    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021, release/bt709-dual-fastpath-cap28-no-logs-20261021, experiment/eof-cap28-drain-20261021, experiment/eof-drain-eos-complete-20261021, experiment/eof-source-bound-shorttail-20261021, experiment/eof-stall-watchdiag-20261021, experiment/eof-dependency-trace-20261021, experiment/eof-duration-deadlock-fix-dlogs-20261021, release/eof-durationfix-dualfastpath-cap28-nolog-20261022, experiment/startseek-clock-burst-20261022]
+    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021, release/bt709-dual-fastpath-cap28-no-logs-20261021, experiment/eof-cap28-drain-20261021, experiment/eof-drain-eos-complete-20261021, experiment/eof-source-bound-shorttail-20261021, experiment/eof-stall-watchdiag-20261021, experiment/eof-dependency-trace-20261021, experiment/eof-duration-deadlock-fix-dlogs-20261021, release/eof-durationfix-dualfastpath-cap28-nolog-20261022, experiment/startseek-clock-burst-20261022, experiment/startseek-raw-input-gap-20261022]
   workflow_dispatch:
 
 permissions:
@@ -87,7 +87,7 @@ jobs:
           if ($frame -notmatch 'inline auto EofWatch\(bool, const wchar_t\*, \.\.\.\) noexcept -> void \{\}' -or $frame -match 'g_eofWatchFile|g_eofWatchEnabled|VapourSynth_EOFWatch_') {
             throw "Old EOFWatch sink must stay disabled."
           }
-          if ($frame -notmatch 'StartSeekProbe' -or $frame -notmatch 'StartSeekDump' -or $frame -notmatch 'SOURCE_INPUT' -or $frame -notmatch 'DELIVER_BEGIN' -or $frame -notmatch 'OUTPUT_READY' -or $frame -notmatch 'VapourSynth_StartSeek_' -or $frame -notmatch 'StreamTime\(graphStreamTime\)') {
+          if ($frame -notmatch 'StartSeekProbe' -or $frame -notmatch 'StartSeekDump' -or $frame -notmatch 'SOURCE_INPUT' -or $frame -notmatch 'DELIVER_BEGIN' -or $frame -notmatch 'OUTPUT_READY' -or $frame -notmatch 'VapourSynth_StartSeek_' -or $frame -notmatch 'StreamTime\(graphStreamTime\)' -or $frame -notmatch 'OUTPUT_ABS' -or $frame -notmatch 'RAW_RECEIVE' -or $src -notmatch 'RAW_RECEIVE' -or $src -notmatch 'FILTER_SKIP' -or $src -notmatch 'ADDINPUT_REJECT' -or $src -notmatch 'KEYFRAME_SKIP' -or $header -notmatch 'TraceUpstreamInput') {
             throw "Required bounded startup/seek clock probes missing."
           }
 
@@ -126,7 +126,7 @@ jobs:
             "Fix: include final source presentation interval in bounded output watermark"
               "No regular Filter log output and no MVUtensils FrameTimingDiag log"
                   "Confirmed bug: VSAPI mapNumElements(-1) for missing duration, not 0; corrected terminal frame check to <= 0"
-            "Temporary diagnostic: bounded RAM-only QPC samples for startup/seek; writes D:\\SynthFilters\\VapourSynth_StartSeek_<PID>.txt at safe flush boundary"
+            "Temporary diagnostic: input Receive PTS vs admitted source PTS, filter-skip markers, original source absolute PTS and output PTS to distinguish upstream drop vs interpolation timeline drift"
             "Removed: request/callback QPC diagnostics, additional maps, diagnostic log calls, per-frame telemetry"
             "Disabled: original Environment logfile creation even when configured in INI"
             "Untouched: VapourSynth interpolation script; input/output pixel-format conversion; colorspace updates"
@@ -139,7 +139,7 @@ jobs:
       - name: Upload compiled filter
         uses: actions/upload-artifact@v4
         with:
-          name: potplayer-vsfilter-startseek-clock-probe-eof-fixed-x64
+          name: potplayer-vsfilter-startseek-raw-pts-gap-diag-eof-fixed-x64
           path: dist/*
           if-no-files-found: error
           retention-days: 30
