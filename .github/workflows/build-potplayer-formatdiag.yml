@@ -1,8 +1,8 @@
-name: Build Release VapourSynth Filter - BT709 dual Fast Path + CAP28 - logging disabled
+name: Build EOF-safe CAP28 queue replenishment, dual BT709 Fast Paths - no logs
 
 on:
   push:
-    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021, release/bt709-dual-fastpath-cap28-no-logs-20261021]
+    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021, release/bt709-dual-fastpath-cap28-no-logs-20261021, experiment/eof-cap28-drain-20261021]
   workflow_dispatch:
 
 permissions:
@@ -65,6 +65,12 @@ jobs:
           if ($frame -notmatch 'MAX_PENDING_OUTPUT_FRAMES = 28' -or $frame -notmatch '_outputFrames.size\(\) >= MAX_PENDING_OUTPUT_FRAMES') {
             throw "CAP28 bound must be retained."
           }
+          if ($frame -notmatch 'void FrameHandler::RequestPendingOutputFrames\(\)' -or $frame -notmatch '_maxRequestOutputFrameNb' -or $frame -notmatch 'RequestPendingOutputFrames\(\);' -or $header -notmatch 'auto RequestPendingOutputFrames\(\) -> void') {
+            throw "Automatic refill on frame delivery, especially after decoder EOS, is missing."
+          }
+          if ($frame -match 'while \(_nextOutputFrameNb <= maxRequestOutputFrameNb\)') {
+            throw "Old input-only CAP28 request loop should be replaced by the refill pump."
+          }
           if ($frame -match '_outputRequestTimes' -or $header -match '_outputRequestTimes') {
             throw "Diagnostic timing map must not exist."
           }
@@ -88,6 +94,8 @@ jobs:
             "Configuration: Release x64"
             "Kept: exact BT709 Receive Fast Path; exact BT709 CheckInputType Precheck Fast Path"
             "Kept: CAP28 pending output request bound and original async/delivery frame order"
+            "Fix: after completed frame delivery, refill CAP28 from highest eligible source-derived frame index"
+            "Fix: continue requesting remaining eligible outputs when decoder reaches EOS and no further input samples arrive"
             "Removed: request/callback QPC diagnostics, additional maps, diagnostic log calls, per-frame telemetry"
             "Disabled: original Environment logfile creation even when configured in INI"
             "Untouched: VapourSynth interpolation script; input/output pixel-format conversion; colorspace updates"
@@ -100,7 +108,7 @@ jobs:
       - name: Upload compiled filter
         uses: actions/upload-artifact@v4
         with:
-          name: potplayer-vsfilter-bt709-dual-fastpath-cap28-nolog-release-x64
+          name: potplayer-vsfilter-eof-cap28-drain-dualfastpath-nolog-x64
           path: dist/*
           if-no-files-found: error
           retention-days: 30
