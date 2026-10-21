@@ -1,8 +1,8 @@
-name: Build source-frame continuity fix - no DShow quality skip - dual BT709 CAP28 EOF
+name: Build verified fully clean VapourSynth x64 - A/V sync BT709 CAP28 EOF
 
 on:
   push:
-    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021, release/bt709-dual-fastpath-cap28-no-logs-20261021, experiment/eof-cap28-drain-20261021, experiment/eof-drain-eos-complete-20261021, experiment/eof-source-bound-shorttail-20261021, experiment/eof-stall-watchdiag-20261021, experiment/eof-dependency-trace-20261021, experiment/eof-duration-deadlock-fix-dlogs-20261021, release/eof-durationfix-dualfastpath-cap28-nolog-20261022, experiment/vsfilter-preserve-decoder-frames-no-dshow-quality-skip-20261022]
+    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021, release/bt709-dual-fastpath-cap28-no-logs-20261021, experiment/eof-cap28-drain-20261021, experiment/eof-drain-eos-complete-20261021, experiment/eof-source-bound-shorttail-20261021, experiment/eof-stall-watchdiag-20261021, experiment/eof-dependency-trace-20261021, experiment/eof-duration-deadlock-fix-dlogs-20261021, release/eof-durationfix-dualfastpath-cap28-nolog-20261022, experiment/vsfilter-preserve-decoder-frames-no-dshow-quality-skip-20261022, release/vsfilter-fully-clean-avsync-cap28-eof-20261022]
   workflow_dispatch:
 
 permissions:
@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Apply clean production dual fastpaths + CAP28 patch
+      - name: Apply verified clean A/V source continuity + EOF + CAP28 patch
         shell: pwsh
         run: |
           python .github/scripts/patch_vsfilter_diag.py avisynth_filter *> apply-patch.log
@@ -85,14 +85,27 @@ jobs:
           if ($frame -notmatch 'std::memory_order_acquire' -or $frame -notmatch 'std::memory_order_release' -or $frame -notmatch 'SourceAvgFrameDuration\(\)' -or $frame -notmatch '_nextSourceFrameNb < Environment::GetInstance\(\).GetInitialSrcBuffer\(\)') {
             throw "EOS source lookahead resolution / short-tail script startup / last frame request bound are missing."
           }
-          if ($frame -notmatch 'EOS_WAIT_TIMEOUT' -or $frame -notmatch 'CALLBACK_LOST_FAILED_FRAME' -or $frame -notmatch 'OUTPUT_PTS' -or $frame -notmatch 'SOURCE_LOOKAHEAD' -or $frame -notmatch 'OUTPUT_DELIVER_DONE' -or $frame -notmatch 'EofWatch' -or $frame -notmatch 'SOURCE_WAIT_TIMEOUT' -or $frame -notmatch 'SOURCE_RESULT' -or $frame -notmatch 'FLUSH_SIGNAL') {
-            throw "Narrow EOF watchdog markers missing."
-          }
           if ($frame -notmatch 'durationNumElementsBefore <= 0' -or $frame -notmatch 'durationDenElementsBefore <= 0') {
-            throw "Terminal duration -1 missing-key bugfix absent."
+            throw "Terminal duration (-1 missing keys) fix has been lost."
           }
-          if ($frame -notmatch 'inline auto EofWatch\(bool, const wchar_t\*, \.\.\.\) noexcept -> void \{\}' -or $frame -match 'CreateDirectoryW|_wfopen_s|fwprintf_s|vfwprintf_s|QueryPerformanceCounter|g_eofWatchFile|g_eofWatchEnabled|VapourSynth_EOFWatch_') {
-            throw "Diagnostic EOFWatch sink remains or no-op verification failed."
+          if ($frame -notmatch '_newSourceFrameCv.wait\(sharedSourceLock' -or $frame -notmatch '_deliverSampleCv.wait\(sharedOutputLock') {
+            throw "Original predicate-based source/output blocking waits were not restored."
+          }
+          if ($frame -match 'wait_for\(') {
+            throw "Temporary diagnostic timed wait code still remains."
+          }
+          $forbidden = @(
+            'EofWatch', 'EOF_DURATION_BEFORE', 'EOF_DURATION_AFTER',
+            'StartSeekProbe', 'StartSeekDump', 'TraceUpstreamInput', 'STARTSEEK',
+            'SOURCE_WAIT_TIMEOUT', 'EOS_WAIT_TIMEOUT', 'FLUSH_SIGNAL',
+            'INPUT_EOS_ENTER', 'OUTPUT_DELIVER_DONE', 'CALLBACK_LOST_FAILED_FRAME',
+            'QueryPerformanceCounter', 'VapourSynth_EOFWatch_', 'VapourSynth_StartSeek_',
+            '_wfopen_s', 'fwprintf_s', 'vfwprintf_s', 'CreateDirectoryW', 'callback_qpc'
+          )
+          foreach ($token in $forbidden) {
+            if ($src.Contains($token) -or $frame.Contains($token) -or $header.Contains($token) -or $envSource.Contains($token)) {
+              throw "Diagnostic code unexpectedly remains: $token"
+            }
           }
           if ($frame -match 'while \(_nextOutputFrameNb <= maxRequestOutputFrameNb\)') {
             throw "Old input-only CAP28 request loop should be replaced by the refill pump."
@@ -118,36 +131,29 @@ jobs:
             "Source repository: CrendKing/avisynth_filter"
             "Pinned source commit: a07ccda967261832233185f1e1d9979ba12593c0"
             "Configuration: Release x64"
-            "Kept: exact BT709 Receive Fast Path; exact BT709 CheckInputType Precheck Fast Path"
-            "Kept: CAP28 pending output request bound and original async/delivery frame order"
-            "Fix: after completed frame delivery, refill CAP28 from highest eligible source-derived frame index"
-            "Fix: continue requesting remaining eligible outputs when decoder reaches EOS and no further input samples arrive"
-            "Fix: override CTransformFilter default EOS, notify renderer only after all output frames are delivered"
-            "Fix: ensure final input source frame duration properties exist for last-frame dependencies"
-            "Fix: wake blocked lookahead GetSourceFrame calls at EOF and supply last real source frame"
-            "Fix: initialize main script at upstream EOF when fewer than InitialSrcBuffer frames remain following a seek"
-            "Fix: include final source presentation interval in bounded output watermark"
-              "No regular Filter log output and no MVUtensils FrameTimingDiag log"
-                  "Confirmed bug: VSAPI mapNumElements(-1) for missing duration, not 0; corrected terminal frame check to <= 0"
-            "Clean experimental x64 release: no diagnostic logfile or additional frame-level tracing"
-            "Removed: request/callback QPC diagnostics, additional maps, diagnostic log calls, per-frame telemetry"
-            "Disabled: original Environment logfile creation even when configured in INI"
-            "Untouched: VapourSynth interpolation script; input/output pixel-format conversion; colorspace updates"
-            "Scope: exact VIDEOINFOHEADER2 dwControlFlags 0 to 0x2880A581, other media type changes use upstream behavior"
-            "Companion: use non-diagnostic MVUtensils AVX2 DLL to disable its separate FrameTimingDiag log"
-            "A/V continuity fix: bypass inherited CVideoTransformFilter::ShouldSkipFrame() in VapourSynth only; retain all source sample PTS and decoded video frames"
+            "Kept: BT.709 Receive and CheckInputType Precheck Fast Paths (metadata-only)"
+            "Kept: CAP28 source-driven output refill and original asynchronous delivery order"
+            "Kept: VapourSynth input continuity - no inherited quality frame skipping"
+            "Kept: EOF deferred downstream notification and final frame watermark"
+            "Kept: EOF last-frame lookahead, short-tail source script activation"
+            "Kept: VSAPI missing-duration check <= 0 and terminal frame duration stamping"
+            "Clean: removed all EOFWatch/StartSeek diagnostic probes, no-op logger, timed watchdog waits"
+            "Clean: original condition_variable predicate waits restored; no runtime diagnostic output file opened"
+            "Clean: built-in Environment logfile creation disabled regardless of configured LogFile"
+            "Untouched: interpolation script, pixel-format/color-space processing, source PTS and renderer"
+            "Runtime note: verify playback and WASAPI independent of this instrumentation cleanup"
           ) | Set-Content dist/BUILD-INFO.txt
           Get-FileHash (Join-Path dist $dll.Name) -Algorithm SHA256 | Format-List | Out-String | Set-Content dist/SHA256.txt
 
       - name: Upload compiled filter
         uses: actions/upload-artifact@v4
         with:
-          name: potplayer-vsfilter-no-dshow-quality-frame-skip-eof-fixed-4k90-x64
+          name: potplayer-vsfilter-fully-clean-dualfastpath-cap28-avsync-eof-release-x64
           path: dist/*
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload patch/build diagnostic logs
+      - name: Upload CI build logs (not included in release)
         if: always()
         uses: actions/upload-artifact@v4
         with:
