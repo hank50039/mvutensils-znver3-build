@@ -2,7 +2,7 @@ name: Build PotPlayer VapourSynth diagnostics with original queue behavior
 
 on:
   push:
-    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021]
+    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021]
   workflow_dispatch:
 
 permissions:
@@ -64,6 +64,8 @@ jobs:
           if ($frame -notmatch 'STARTPOINTDIAG AddInputSample_wait' -or $frame -notmatch 'STARTPOINTDIAG OutputFrame_ready' -or $frame -notmatch 'STARTPOINTDIAG OutputFrame_submit' -or $frame -notmatch 'STARTPOINTDIAG OutputFrame_callback_lock') {
             throw "Sparse start-position wait, output-frame callback latency, async-submit time, and callback-lock timing diagnostics are missing."
           }
+          $envSource = Get-Content avisynth_filter/filter_common/src/environment.cpp -Raw
+          if ($envSource -notmatch '_logPath.replace_extension\(L"\.txt"\)') { throw 'The Filter .txt logging destination patch is missing.' }
           $header = Get-Content avisynth_filter/vapoursynth_filter/src/frame_handler.h -Raw
           if ($header -notmatch '_outputRequestTimes') {
             throw "Per-frame request timestamp tracking is missing."
@@ -92,6 +94,7 @@ jobs:
             "Configuration: Release x64"
             "Output: vapoursynth_filter_x64.ax"
             "Diagnostics: FORMAT_DIFF_*, RECVTRACE, DYNAMIC_MT, STARTPOINTDIAG AddInputSample_wait, OutputFrame_ready, OutputFrame_submit, OutputFrame_callback_lock"
+            "Diagnostic logfile: configured log path with .txt extension (no INI/registry write)"
             "BT.709 metadata-only Fast Path: retained"
             "CAP28 request bound: retained at the previously validated 28 pending outputs"
             "AddInputSample wait predicate, async request ordering, and delivery order: unchanged"
@@ -108,7 +111,7 @@ jobs:
       - name: Upload compiled filter
         uses: actions/upload-artifact@v4
         with:
-          name: potplayer-vapoursynth-formatdiag-original-queue-x64
+          name: potplayer-vsfilter-startpoint-burst-txt-x64
           path: dist/*
           if-no-files-found: error
           retention-days: 30
