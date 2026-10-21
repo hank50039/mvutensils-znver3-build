@@ -677,6 +677,46 @@ replace_once(
     "Watchdog for stuck delivery head of line without changing output request order"
 )
 
+
+replace_once(
+    frame_cpp,
+    '''            const auto last = std::prev(_sourceFrames.end());
+            VSMap *props =''',
+    '''            const auto last = std::prev(_sourceFrames.end());
+            EofWatch(false, L"SOURCE_TAIL oldest=%d last=%d last_pts_100ns=%lld source_total=%d",
+                     _sourceFrames.begin()->first, last->first,
+                     static_cast<long long>(last->second.startTime), _nextSourceFrameNb);
+            VSMap *props =''',
+    "Log final real source PTS when EOS arrives"
+)
+replace_once(
+    frame_cpp,
+    '''            iter = std::prev(_sourceFrames.end());
+        }
+
+        const VSMap *frameProps =''',
+    '''            iter = std::prev(_sourceFrames.end());
+            EofWatch(false, L"SOURCE_LOOKAHEAD requested=%d clamped_to=%d",
+                     frameNb, iter->first);
+        }
+
+        const VSMap *frameProps =''',
+    "Observe final-frame lookahead clamping"
+)
+replace_once(
+    frame_cpp,
+    '''    _nextOutputFrameStartTime = frameStopTime;
+
+    Environment::GetInstance().Log''',
+    '''    _nextOutputFrameStartTime = frameStopTime;
+    EofWatch(false, L"OUTPUT_PTS frame=%d start_100ns=%lld stop_100ns=%lld",
+             outputFrameNb, static_cast<long long>(frameStartTime),
+             static_cast<long long>(frameStopTime));
+
+    Environment::GetInstance().Log''',
+    "Measure generated output PTS near EOS"
+)
+
 # Disable the built-in logfile as well, even if a stale LogFile= entry
 # remains in the user's existing INI/registry settings. No settings are
 # changed and no runtime logfile is opened. Calls to Environment::Log
