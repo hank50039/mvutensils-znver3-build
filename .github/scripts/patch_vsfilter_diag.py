@@ -1153,6 +1153,25 @@ frame_trace_cpp = probe_replace(frame_trace_cpp,
     }''',
     "Check propagated source absolute PTS per interpolated frame")
 
+# filter.cpp is shared with AviSynth variant. Only VapourSynth has this
+# tracing helper; keep the AviSynth build entirely unchanged.
+for call in (
+    'frameHandler->TraceUpstreamInput("RAW_RECEIVE", pSample);',
+    'frameHandler->TraceUpstreamInput("FILTER_SKIP", pSample);',
+    'frameHandler->TraceUpstreamInput("ADDINPUT_REJECT", pSample);',
+    'frameHandler->TraceUpstreamInput("KEYFRAME_SKIP", pSample);',
+):
+    if filter_trace_cpp.count(call) != 1:
+        raise SystemExit("Trace call missing or repeated: " + call)
+    filter_trace_cpp = filter_trace_cpp.replace(
+        call, "#ifdef AVSF_VAPOURSYNTH\\n    " + call +
+              "\\n#endif", 1)
+# The replacement above writes escaped newlines as separators; convert only
+# in the added preprocessor wrappers, never touch other source literals.
+filter_trace_cpp = filter_trace_cpp.replace(
+    "#ifdef AVSF_VAPOURSYNTH\\n", "#ifdef AVSF_VAPOURSYNTH\n").replace(
+    "\\n#endif", "\n#endif")
+
 filter_cpp.write_text(filter_trace_cpp, encoding="utf-8", newline="")
 frame_cpp.write_text(frame_trace_cpp, encoding="utf-8", newline="")
 
