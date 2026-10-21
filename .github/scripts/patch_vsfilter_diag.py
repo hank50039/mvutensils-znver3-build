@@ -1158,7 +1158,6 @@ frame_trace_cpp = probe_replace(frame_trace_cpp,
 for call in (
     'frameHandler->TraceUpstreamInput("RAW_RECEIVE", pSample);',
     'frameHandler->TraceUpstreamInput("FILTER_SKIP", pSample);',
-    'frameHandler->TraceUpstreamInput("ADDINPUT_REJECT", pSample);',
     'frameHandler->TraceUpstreamInput("KEYFRAME_SKIP", pSample);',
 ):
     if filter_trace_cpp.count(call) != 1:
@@ -1166,6 +1165,14 @@ for call in (
     filter_trace_cpp = filter_trace_cpp.replace(
         call, "#ifdef AVSF_VAPOURSYNTH\\n    " + call +
               "\\n#endif", 1)
+# Handle the one-line conditional separately: preprocessor directives cannot
+# occur after 'if (hr == S_FALSE)' on the same C++ source line.
+raw_reject_line = '    if (hr == S_FALSE) frameHandler->TraceUpstreamInput("ADDINPUT_REJECT", pSample);'
+if filter_trace_cpp.count(raw_reject_line) != 1:
+    raise SystemExit("Raw reject hook not found")
+filter_trace_cpp = filter_trace_cpp.replace(
+    raw_reject_line,
+    "#ifdef AVSF_VAPOURSYNTH\\n" + raw_reject_line + "\\n#endif", 1)
 # The replacement above writes escaped newlines as separators; convert only
 # in the added preprocessor wrappers, never touch other source literals.
 filter_trace_cpp = filter_trace_cpp.replace(
