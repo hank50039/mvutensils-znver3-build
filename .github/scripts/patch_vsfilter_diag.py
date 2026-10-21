@@ -212,6 +212,148 @@ replace_once(
     "Refill CAP28 from output delivery thread after each completed frame"
 )
 
+
+# DirectShow's default transform-filter EndOfStream sends EOS immediately
+# because it assumes there is NO output worker / queued samples. This Filter
+# has both, so defer EOS until CAP28 is fully drained and all eligible
+# output frames have been delivered to the renderer.
+replace_once(
+    root / "filter_common/src/filter.h",
+    '''    auto Receive(IMediaSample *pSample) -> HRESULT override;
+    auto BeginFlush() -> HRESULT override;''',
+    '''    auto Receive(IMediaSample *pSample) -> HRESULT override;
+    auto EndOfStream() -> HRESULT override;
+    auto BeginFlush() -> HRESULT override;''',
+    "Declare correct asynchronous end-of-stream notification"
+)
+replace_once(
+    filter_cpp,
+    '''    return hr;
+}
+
+auto CSynthFilter::BeginFlush() -> HRESULT {''',
+    '''    return hr;
+}
+
+auto CSynthFilter::EndOfStream() -> HRESULT {
+    // Decoder EOS is NOT output EOS: finish all queued output frames first.
+    frameHandler->SignalInputEndOfStream();
+    return S_OK;
+}
+
+auto CSynthFilter::BeginFlush() -> HRESULT {''',
+    "Override premature downstream end-of-stream notification"
+)
+replace_once(
+    root / "vapoursynth_filter/src/frame_handler.h",
+    '''    auto RequestPendingOutputFrames() -> void;
+    auto GarbageCollect(int srcFrameNb) -> void;''',
+    '''    auto RequestPendingOutputFrames() -> void;
+    auto SignalInputEndOfStream() -> void;
+    auto DeliverEndOfStreamIfDrained() -> void;
+    auto GarbageCollect(int srcFrameNb) -> void;''',
+    "Queue-drained end-of-stream declarations"
+)
+replace_once(
+    root / "vapoursynth_filter/src/frame_handler.h",
+    '''    int _maxRequestOutputFrameNb = -1;
+    REFERENCE_TIME _nextOutputFrameStartTime;''',
+    '''    int _maxRequestOutputFrameNb = -1;
+    bool _inputEosSeen = false;  // guarded by _outputMutex
+    bool _eosForwarded = false;  // guarded by _outputMutex
+    REFERENCE_TIME _nextOutputFrameStartTime;''',
+    "End-of-stream state tracking"
+)
+replace_once(
+    frame_cpp,
+    '''auto FrameHandler::RequestPendingOutputFrames() -> void {''',
+    '''auto FrameHandler::SignalInputEndOfStream() -> void {
+    // The final source frame never gets duration properties from a following
+    // source frame. Derive a final duration from the previous source interval
+    // (or the source's nominal duration), so any waiting FlowFPS requests
+    // referring to the last frame can complete normally.
+    {
+        const std::unique_lock sourceLock(_sourceMutex);
+        if (!_sourceFrames.empty()) {
+            const auto last = std::prev(_sourceFrames.end());
+            VSMap *props = AVSF_VPS_API->getFramePropertiesRW(last->second.autoFrame.frame);
+            if (AVSF_VPS_API->mapNumElements(props, FRAME_PROP_NAME_DURATION_NUM) == 0 ||
+                AVSF_VPS_API->mapNumElements(props, FRAME_PROP_NAME_DURATION_DEN) == 0) {
+                REFERENCE_TIME duration = MainFrameServer::GetInstance().GetSourceAvgFrameDuration();
+                if (last != _sourceFrames.begin()) {
+                    const auto previous = std::prev(last);
+                    if (last->second.startTime > previous->second.startTime) {
+                        duration = last->second.startTime - previous->second.startTime;
+                    }
+                }
+                if (duration > 0) {
+                    REFERENCE_TIME numerator = duration;
+                    REFERENCE_TIME denominator = UNITS;
+                    CoprimeIntegers(numerator, denominator);
+                    AVSF_VPS_API->mapSetInt(props, FRAME_PROP_NAME_DURATION_NUM, numerator, maReplace);
+                    AVSF_VPS_API->mapSetInt(props, FRAME_PROP_NAME_DURATION_DEN, denominator, maReplace);
+                }
+            }
+        }
+    }
+    _newSourceFrameCv.notify_all();
+
+    {
+        const std::unique_lock outputLock(_outputMutex);
+        _inputEosSeen = true;
+    }
+
+    // Continue draining the final eligible frames even though the decoder
+    // will never call AddInputSample again.
+    RequestPendingOutputFrames();
+    DeliverEndOfStreamIfDrained();
+}
+
+auto FrameHandler::DeliverEndOfStreamIfDrained() -> void {
+    bool deliverEos = false;
+    {
+        const std::unique_lock outputLock(_outputMutex);
+        if (_inputEosSeen && !_eosForwarded && !_isFlushing && !_isStopping &&
+            _nextOutputFrameNb > _maxRequestOutputFrameNb && _outputFrames.empty()) {
+            _eosForwarded = true;
+            deliverEos = true;
+        }
+    }
+    if (deliverEos && !_isFlushing && !_isStopping) {
+        _filter.m_pOutput->DeliverEndOfStream();
+    }
+}
+
+auto FrameHandler::RequestPendingOutputFrames() -> void {''',
+    "Finalize last source frame and delay EOS until all outputs are delivered"
+)
+replace_once(
+    frame_cpp,
+    '''    _maxRequestOutputFrameNb = -1;
+    _lastUsedSourceFrameNb = 0;''',
+    '''    _maxRequestOutputFrameNb = -1;
+    {
+        const std::unique_lock outputLock(_outputMutex);
+        _inputEosSeen = false;
+        _eosForwarded = false;
+    }
+    _lastUsedSourceFrameNb = 0;''',
+    "Clear stale EOS state on graph start/reload/seek"
+)
+replace_once(
+    frame_cpp,
+    '''        RequestPendingOutputFrames();
+    }
+
+    Environment::GetInstance().Log(L"Stop worker thread");''',
+    '''        RequestPendingOutputFrames();
+        DeliverEndOfStreamIfDrained();
+    }
+
+    Environment::GetInstance().Log(L"Stop worker thread");''',
+    "Send downstream EOS only after worker has delivered the last output"
+)
+
 # Disable the built-in logfile as well, even if a stale LogFile= entry
 # remains in the user's existing INI/registry settings. No settings are
 # changed and no runtime logfile is opened. Calls to Environment::Log
@@ -239,10 +381,12 @@ assert "MAX_PENDING_OUTPUT_FRAMES = 28" in modified["frame"]
 assert modified["frame"].count("getFrameAsync(") == 1
 assert "RequestPendingOutputFrames();" in modified["frame"]
 assert "_maxRequestOutputFrameNb" in modified["frame"]
+assert "SignalInputEndOfStream()" in modified["frame"]
+assert "DeliverEndOfStreamIfDrained()" in modified["frame"]
 assert "_outputRequestTimes" not in modified["frame"]
 assert "_wfsopen" not in modified["environment"]
 for tag in ("STARTPOINTDIAG", "RECVTRACE", "FORMAT_DIFF", "DYNAMIC_MT_FASTPATH", "DYNAMIC_MT_PRECHECK_FASTPATH", "CAP28DIAG"):
     if any(tag in x for x in modified.values()):
         raise SystemExit("Unexpected diagnostic marker remains: " + tag)
 
-print("Release patch complete: dual BT709 Fast Paths + CAP28 auto-refill after output delivery; no runtime logs.")
+print("Release patch complete: dual BT709 Fast Paths + CAP28 refill + correct async EOS + no runtime logs.")
