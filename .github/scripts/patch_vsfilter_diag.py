@@ -300,8 +300,14 @@ replace_once(
         if (!_sourceFrames.empty()) {
             const auto last = std::prev(_sourceFrames.end());
             VSMap *props = AVSF_VPS_API->getFramePropertiesRW(last->second.autoFrame.frame);
-            if (AVSF_VPS_API->mapNumElements(props, FRAME_PROP_NAME_DURATION_NUM) == 0 ||
-                AVSF_VPS_API->mapNumElements(props, FRAME_PROP_NAME_DURATION_DEN) == 0) {
+            // CRITICAL BUGFIX: VSAPI mapNumElements returns -1 when a
+            // property key is ABSENT (not 0). Prior ==0 checks never ran
+            // for the terminal frame, leaving GetSourceFrame stuck at EOS.
+            const int durationNumElementsBefore = AVSF_VPS_API->mapNumElements(props, FRAME_PROP_NAME_DURATION_NUM);
+            const int durationDenElementsBefore = AVSF_VPS_API->mapNumElements(props, FRAME_PROP_NAME_DURATION_DEN);
+            EofWatch(false, L"EOF_DURATION_BEFORE frame=%d num_elements=%d den_elements=%d",
+                     last->first, durationNumElementsBefore, durationDenElementsBefore);
+            if (durationNumElementsBefore <= 0 || durationDenElementsBefore <= 0) {
                 REFERENCE_TIME duration = MainFrameServer::GetInstance().GetSourceAvgFrameDuration();
                 if (last != _sourceFrames.begin()) {
                     const auto previous = std::prev(last);
@@ -313,8 +319,15 @@ replace_once(
                     REFERENCE_TIME numerator = duration;
                     REFERENCE_TIME denominator = UNITS;
                     CoprimeIntegers(numerator, denominator);
-                    AVSF_VPS_API->mapSetInt(props, FRAME_PROP_NAME_DURATION_NUM, numerator, maReplace);
-                    AVSF_VPS_API->mapSetInt(props, FRAME_PROP_NAME_DURATION_DEN, denominator, maReplace);
+                    const int setNumResult = AVSF_VPS_API->mapSetInt(props, FRAME_PROP_NAME_DURATION_NUM, numerator, maReplace);
+                    const int setDenResult = AVSF_VPS_API->mapSetInt(props, FRAME_PROP_NAME_DURATION_DEN, denominator, maReplace);
+                    EofWatch(false, L"EOF_DURATION_AFTER frame=%d num_elements=%d den_elements=%d set_num_result=%d set_den_result=%d duration_num=%lld duration_den=%lld",
+                             last->first,
+                             AVSF_VPS_API->mapNumElements(props, FRAME_PROP_NAME_DURATION_NUM),
+                             AVSF_VPS_API->mapNumElements(props, FRAME_PROP_NAME_DURATION_DEN),
+                             setNumResult, setDenResult,
+                             static_cast<long long>(numerator),
+                             static_cast<long long>(denominator));
                 }
             }
         }
@@ -477,13 +490,14 @@ auto EofWatch(bool always, const wchar_t *fmt, ...) noexcept -> void {
     }
     const std::scoped_lock lock(g_eofWatchMutex);
     if (g_eofWatchFile == nullptr) {
-        wchar_t dir[MAX_PATH]{};
         wchar_t filename[MAX_PATH]{};
-        const DWORD len = GetTempPathW(MAX_PATH, dir);
-        if (len == 0 || len >= MAX_PATH) {
+        // User-requested persistent diagnostic location; create if absent.
+        if (!CreateDirectoryW(L"D:\\SynthFilters", nullptr) &&
+            GetLastError() != ERROR_ALREADY_EXISTS) {
             return;
         }
-        swprintf_s(filename, L"%lsVapourSynth_EOFWatch_%lu.txt", dir, GetCurrentProcessId());
+        swprintf_s(filename, L"D:\\SynthFilters\\VapourSynth_EOFWatch_%lu.txt",
+                   GetCurrentProcessId());
         if (_wfopen_s(&g_eofWatchFile, filename, L"w") != 0 || g_eofWatchFile == nullptr) {
             return;
         }
@@ -801,6 +815,13 @@ replace_once(
     "Correlate flush signal and release of pending callbacks"
 )
 
+
+# Regression fix after detailed EOF logs confirmed the final frame 203 was
+# present, but SourceGetFrame(203/204/205) waited until shutdown. VSAPI's
+# mapNumElements() returns -1 when a duration key does not exist. Earlier code
+# incorrectly compared ==0; therefore the terminal frame was never stamped.
+# Here we use <=0 and inspect the actual result in the D:\SynthFilters log.
+
 # Disable the built-in logfile as well, even if a stale LogFile= entry
 # remains in the user's existing INI/registry settings. No settings are
 # changed and no runtime logfile is opened. Calls to Environment::Log
@@ -835,6 +856,9 @@ assert "_inputEosSeen.store(true, std::memory_order_release)" in modified["frame
 assert "_nextSourceFrameNb < Environment::GetInstance().GetInitialSrcBuffer()" in modified["frame"]
 assert "_outputRequestTimes" not in modified["frame"]
 assert "_wfsopen" not in modified["environment"]
+assert "EOF_DURATION_BEFORE" in modified["frame"]
+assert "EOF_DURATION_AFTER" in modified["frame"]
+assert "D:\\\\SynthFilters\\\\VapourSynth_EOFWatch_" in modified["frame"]
 assert "SOURCE_WAIT_TIMEOUT" in modified["frame"]
 assert "FLUSH_SIGNAL" in modified["frame"]
 assert "EOS_WAIT_TIMEOUT" in modified["frame"]
@@ -843,4 +867,4 @@ for tag in ("STARTPOINTDIAG", "RECVTRACE", "FORMAT_DIFF", "DYNAMIC_MT_FASTPATH",
     if any(tag in x for x in modified.values()):
         raise SystemExit("Unexpected diagnostic marker remains: " + tag)
 
-print("EOF source-dependency diagnostic: dual Fast Paths + CAP28, narrow multi-line %TEMP% EOFWatch, no normal logging.")
+print("EOF fix: absent terminal duration keys (VSAPI -1) repaired; EOFWatch now writes to D:\\SynthFilters; dual Fast Paths + CAP28 preserved.")
