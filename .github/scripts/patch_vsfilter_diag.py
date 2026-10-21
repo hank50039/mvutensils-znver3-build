@@ -779,7 +779,7 @@ replace_once(
     if (_inputEosSeen.load(std::memory_order_acquire) &&
         (sourceWaitUs > 100000 || frameNb >= _nextSourceFrameNb - 6)) {
         EofWatch(false, L"SOURCE_RESULT requested=%d resolved=%d waited_us=%lld oldest=%d latest=%d",
-                 frameNb, _sourceFrames.empty() ? -1 : iter->first,
+                 frameNb, (_isFlushing || _sourceFrames.empty()) ? -1 : iter->first,
                  static_cast<long long>(sourceWaitUs),
                  _sourceFrames.empty() ? -1 : _sourceFrames.begin()->first,
                  _sourceFrames.empty() ? -1 : _sourceFrames.rbegin()->first);
