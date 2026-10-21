@@ -35,9 +35,16 @@ jobs:
           Get-Content apply-patch.log | Write-Output
           if ($patchExitCode -ne 0) { throw "Diagnostic patch failed with exit code $patchExitCode." }
 
+      - name: Authenticate GitHub dependency metadata queries
+        shell: pwsh
+        run: |
+          python .github/scripts/patch_build_dependency_auth.py avisynth_filter/build.ps1
+
       - name: Build Release x64
         shell: pwsh
         working-directory: avisynth_filter
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           ./build.ps1 -Configuration Release -Platform x64
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
