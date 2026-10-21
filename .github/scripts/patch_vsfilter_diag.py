@@ -1056,6 +1056,107 @@ trace_cpp = probe_replace(trace_cpp,
     "Dump trace at safe latched flush boundary")
 frame_cpp.write_text(trace_cpp, encoding="utf-8", newline="")
 
+
+# PTS-gap follow-up. Two captures showed a 0.48-0.99 second leap in
+# decoded-source PTS near source frame 104, while Filter output timestamps
+# remain continuously spaced at 90 Hz. Trace each upstream Receive() sample
+# BEFORE ShouldSkipFrame() to separate decoder-side loss from Filter skipping.
+filter_trace_cpp = filter_cpp.read_text(encoding="utf-8")
+filter_trace_hdr = root / "vapoursynth_filter/src/frame_handler.h"
+header_trace = filter_trace_hdr.read_text(encoding="utf-8")
+frame_trace_cpp = frame_cpp.read_text(encoding="utf-8")
+
+header_trace = probe_replace(header_trace,
+    '''    auto AddInputSample(IMediaSample *inputSample) -> HRESULT;
+    auto GetSourceFrame(int frameNb) -> const VSFrame *;''',
+    '''    auto AddInputSample(IMediaSample *inputSample) -> HRESULT;
+    auto TraceUpstreamInput(const char *tag, IMediaSample *sample) -> void;
+    auto GetSourceFrame(int frameNb) -> const VSFrame *;''',
+    "Public helper for read-only raw input diagnostics")
+filter_trace_hdr.write_text(header_trace, encoding="utf-8", newline="")
+
+frame_trace_cpp = probe_replace(frame_trace_cpp,
+    '''std::atomic<unsigned> g_startSeekPos{0};
+unsigned g_startSeekEpoch = 0;''',
+    '''std::atomic<unsigned> g_startSeekPos{0};
+std::atomic<int> g_startSeekRawSeen{0};
+unsigned g_startSeekEpoch = 0;''',
+    "Raw input capture count")
+frame_trace_cpp = probe_replace(frame_trace_cpp,
+    '''    g_startSeekPos.store(0, std::memory_order_release);
+}''',
+    '''    g_startSeekPos.store(0, std::memory_order_release);
+    g_startSeekRawSeen.store(0, std::memory_order_release);
+}''',
+    "Reset raw input capture counter on Flush")
+
+frame_trace_cpp = probe_replace(frame_trace_cpp,
+    '''}
+
+auto FrameHandler::AddInputSample(IMediaSample *inputSample) -> HRESULT {''',
+    '''}
+
+auto FrameHandler::TraceUpstreamInput(const char *tag, IMediaSample *sample) -> void {
+    int raw = g_startSeekRawSeen.load(std::memory_order_relaxed) - 1;
+    if (tag != nullptr && std::strcmp(tag, "RAW_RECEIVE") == 0)
+        raw = g_startSeekRawSeen.fetch_add(1, std::memory_order_relaxed);
+    if (raw < 0 || raw >= 260 || sample == nullptr) return;
+    REFERENCE_TIME rawStart = -1, rawStop = -1;
+    const HRESULT timestampHr = sample->GetTime(&rawStart, &rawStop);
+    CRefTime currentClock;
+    const HRESULT clockHr = _filter.StreamTime(currentClock);
+    StartSeekProbe(tag, raw, SUCCEEDED(timestampHr) ? rawStart : -1,
+                   SUCCEEDED(clockHr) ? currentClock.GetUnits() : -1,
+                   _nextSourceFrameNb);
+}
+
+auto FrameHandler::AddInputSample(IMediaSample *inputSample) -> HRESULT {''',
+    "Trace unmodified decoder samples before filter skip logic")
+
+filter_trace_cpp = probe_replace(filter_trace_cpp,
+    '''    if (ShouldSkipFrame(pSample)) {
+        m_bSampleSkipped = TRUE;''',
+    '''    frameHandler->TraceUpstreamInput("RAW_RECEIVE", pSample);
+    if (ShouldSkipFrame(pSample)) {
+        frameHandler->TraceUpstreamInput("FILTER_SKIP", pSample);
+        m_bSampleSkipped = TRUE;''',
+    "Capture source decoder PTS before any Filter skip decision")
+filter_trace_cpp = probe_replace(filter_trace_cpp,
+    '''    hr = frameHandler->AddInputSample(pSample);
+
+    m_tDecodeStart''',
+    '''    hr = frameHandler->AddInputSample(pSample);
+    if (hr == S_FALSE) frameHandler->TraceUpstreamInput("ADDINPUT_REJECT", pSample);
+
+    m_tDecodeStart''',
+    "Capture rejected input frames")
+filter_trace_cpp = probe_replace(filter_trace_cpp,
+    '''    if (m_nWaitForKey && hr == S_OK) {
+        DbgLog''',
+    '''    if (m_nWaitForKey && hr == S_OK) {
+        frameHandler->TraceUpstreamInput("KEYFRAME_SKIP", pSample);
+        DbgLog''',
+    "Capture keyframe wait skips")
+
+frame_trace_cpp = probe_replace(frame_trace_cpp,
+    '''    if (outputFrameNb < 420) StartSeekProbe("OUTPUT_PTS", outputFrameNb,
+                                            frameStartTime, frameStopTime, sourceFrameNb);''',
+    '''    if (outputFrameNb < 420) {
+        StartSeekProbe("OUTPUT_PTS", outputFrameNb,
+                       frameStartTime, frameStopTime, sourceFrameNb);
+        int absError = peSuccess;
+        const double srcAbsolute = AVSF_VPS_API->mapGetFloat(
+            frameProps, FRAME_PROP_NAME_ABS_TIME, 0, &absError);
+        StartSeekProbe("OUTPUT_ABS", outputFrameNb, frameStartTime,
+                       absError == peSuccess ? static_cast<long long>(srcAbsolute * UNITS) : -1,
+                       sourceFrameNb);
+    }''',
+    "Check propagated source absolute PTS per interpolated frame")
+
+filter_cpp.write_text(filter_trace_cpp, encoding="utf-8", newline="")
+frame_cpp.write_text(frame_trace_cpp, encoding="utf-8", newline="")
+
+
 # Regression fix after detailed EOF logs confirmed the final frame 203 was
 # present, but SourceGetFrame(203/204/205) waited until shutdown. VSAPI's
 # mapNumElements() returns -1 when a duration key does not exist. Earlier code
@@ -1111,9 +1212,12 @@ for tag in ("STARTPOINTDIAG", "RECVTRACE", "FORMAT_DIFF", "DYNAMIC_MT_FASTPATH",
     if any(tag in x for x in modified.values()):
         raise SystemExit("Unexpected diagnostic marker remains: " + tag)
 
+assert "RAW_RECEIVE" in modified["frame"] and "RAW_RECEIVE" in modified["filter"]
+assert "FILTER_SKIP" in modified["filter"]
+assert "OUTPUT_ABS" in modified["frame"]
 assert "VapourSynth_StartSeek_" in modified["frame"]
 assert "StartSeekDump();" in modified["frame"]
 assert "DELIVER_BEGIN" in modified["frame"]
 assert "SOURCE_INPUT" in modified["frame"]
 assert "OUTPUT_READY" in modified["frame"]
-print("StartSeek clock probe verified: EOF fix + dual Fast Paths + CAP28 retained; bounded QPC trace enabled; EOFWatch disabled.")
+print("StartSeek raw decoder PTS + skipped input + output absolute time trace verified; EOF fix + dual Fast Paths + CAP28 intact.")
