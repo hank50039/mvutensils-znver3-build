@@ -1,8 +1,8 @@
-name: Build clean EOF-fixed Release x64 - dual BT709 + CAP28 - no logs
+name: Build startup seek QPC clock probe - EOF fixed dual BT709 CAP28
 
 on:
   push:
-    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021, release/bt709-dual-fastpath-cap28-no-logs-20261021, experiment/eof-cap28-drain-20261021, experiment/eof-drain-eos-complete-20261021, experiment/eof-source-bound-shorttail-20261021, experiment/eof-stall-watchdiag-20261021, experiment/eof-dependency-trace-20261021, experiment/eof-duration-deadlock-fix-dlogs-20261021, release/eof-durationfix-dualfastpath-cap28-nolog-20261022]
+    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021, release/bt709-dual-fastpath-cap28-no-logs-20261021, experiment/eof-cap28-drain-20261021, experiment/eof-drain-eos-complete-20261021, experiment/eof-source-bound-shorttail-20261021, experiment/eof-stall-watchdiag-20261021, experiment/eof-dependency-trace-20261021, experiment/eof-duration-deadlock-fix-dlogs-20261021, release/eof-durationfix-dualfastpath-cap28-nolog-20261022, experiment/startseek-clock-burst-20261022]
   workflow_dispatch:
 
 permissions:
@@ -84,9 +84,13 @@ jobs:
           if ($frame -notmatch 'durationNumElementsBefore <= 0' -or $frame -notmatch 'durationDenElementsBefore <= 0') {
             throw "Terminal duration -1 missing-key bugfix absent."
           }
-          if ($frame -notmatch 'inline auto EofWatch\(bool, const wchar_t\*, \.\.\.\) noexcept -> void \{\}' -or $frame -match 'CreateDirectoryW|_wfopen_s|fwprintf_s|vfwprintf_s|QueryPerformanceCounter|g_eofWatchFile|g_eofWatchEnabled|VapourSynth_EOFWatch_') {
-            throw "Diagnostic EOFWatch sink remains or no-op verification failed."
+          if ($frame -notmatch 'inline auto EofWatch\(bool, const wchar_t\*, \.\.\.\) noexcept -> void \{\}' -or $frame -match 'g_eofWatchFile|g_eofWatchEnabled|VapourSynth_EOFWatch_') {
+            throw "Old EOFWatch sink must stay disabled."
           }
+          if ($frame -notmatch 'StartSeekProbe' -or $frame -notmatch 'StartSeekDump' -or $frame -notmatch 'SOURCE_INPUT' -or $frame -notmatch 'DELIVER_BEGIN' -or $frame -notmatch 'OUTPUT_READY' -or $frame -notmatch 'VapourSynth_StartSeek_' -or $frame -notmatch 'StreamTime\(graphStreamTime\)') {
+            throw "Required bounded startup/seek clock probes missing."
+          }
+
           if ($frame -match 'while \(_nextOutputFrameNb <= maxRequestOutputFrameNb\)') {
             throw "Old input-only CAP28 request loop should be replaced by the refill pump."
           }
@@ -122,20 +126,20 @@ jobs:
             "Fix: include final source presentation interval in bounded output watermark"
               "No regular Filter log output and no MVUtensils FrameTimingDiag log"
                   "Confirmed bug: VSAPI mapNumElements(-1) for missing duration, not 0; corrected terminal frame check to <= 0"
-            "Clean release: EOFWatch logging sink and file creation removed; no runtime diagnostic output"
+            "Temporary diagnostic: bounded RAM-only QPC samples for startup/seek; writes D:\\SynthFilters\\VapourSynth_StartSeek_<PID>.txt at safe flush boundary"
             "Removed: request/callback QPC diagnostics, additional maps, diagnostic log calls, per-frame telemetry"
             "Disabled: original Environment logfile creation even when configured in INI"
             "Untouched: VapourSynth interpolation script; input/output pixel-format conversion; colorspace updates"
             "Scope: exact VIDEOINFOHEADER2 dwControlFlags 0 to 0x2880A581, other media type changes use upstream behavior"
             "Companion: use non-diagnostic MVUtensils AVX2 DLL to disable its separate FrameTimingDiag log"
-            "Based on successfully runtime-tested EOF duration bugfix, with diagnostic sink disabled"
+            "Based on successfully runtime-tested EOF duration bugfix; double Fast Path and CAP28 preserved; no diagnostic disk IO on frame delivery"
           ) | Set-Content dist/BUILD-INFO.txt
           Get-FileHash (Join-Path dist $dll.Name) -Algorithm SHA256 | Format-List | Out-String | Set-Content dist/SHA256.txt
 
       - name: Upload compiled filter
         uses: actions/upload-artifact@v4
         with:
-          name: potplayer-vsfilter-eof-durationfix-dualfastpath-cap28-nolog-release-x64
+          name: potplayer-vsfilter-startseek-clock-probe-eof-fixed-x64
           path: dist/*
           if-no-files-found: error
           retention-days: 30
