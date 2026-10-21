@@ -2,7 +2,7 @@ name: Build PotPlayer VapourSynth diagnostics with original queue behavior
 
 on:
   push:
-    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021]
+    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021]
   workflow_dispatch:
 
 permissions:
@@ -57,6 +57,9 @@ jobs:
           if ($src -notmatch 'FORMAT_DIFF_BYTE' -or $src -notmatch 'RECVTRACE AddInputSample_done' -or $src -notmatch 'DYNAMIC_MT') {
             throw "Expected diagnostic source markers are missing."
           }
+          if ($src -notmatch 'DYNAMIC_MT_PRECHECK_FASTPATH accepted_exact_bt709_control_flags_without_aux_script' -or $src -notmatch 'IsOnlyVideoInfo2ControlFlagsChanged\(m_pInput->CurrentMediaType\(\), \*mtIn\)') {
+            throw "The exact-match metadata-only precheck shortcut is missing."
+          }
           if ($src -notmatch 'DYNAMIC_MT_FASTPATH applied' -or $src -notmatch '_isInputMediaTypeChanged = !traceMetadataOnlyCandidate') {
             throw "The tested BT.709 metadata-only Fast Path must be preserved."
           }
@@ -96,6 +99,8 @@ jobs:
             "Diagnostics: FORMAT_DIFF_*, RECVTRACE, DYNAMIC_MT, STARTPOINTDIAG AddInputSample_wait, OutputFrame_ready, OutputFrame_submit, OutputFrame_callback_lock"
             "Diagnostic logfile: configured log path with .txt extension (no INI/registry write)"
             "BT.709 metadata-only Fast Path: retained"
+            "Experimental: accept exact 0 to 0x2880A581 VIDEOINFOHEADER2 control flags change without auxiliary script probes"
+            "All other media-type validation and changes use upstream paths"
             "CAP28 request bound: retained at the previously validated 28 pending outputs"
             "AddInputSample wait predicate, async request ordering, and delivery order: unchanged"
             "Added thresholded logs for AddInputSample waits >= 20 ms or pending format/reload state"
@@ -103,7 +108,7 @@ jobs:
             "Added getFrameAsync synchronous submit timing logs only at >= 5 ms"
             "Added callback request-map mutex acquisition/lookup timing logs only at >= 5 ms"
             "No CAP28 queue timing instrumentation is added"
-            "Purpose: identify whether a specific late output-frame callback aligns with start-position stutter"
+            "Purpose: isolate whether redundant auxiliary script probes during mid-playback metadata-only input media-type change trigger the 905-1137 frame slowdown"
             "This remains a diagnostic build; playback performance is not claimed."
           ) | Set-Content dist/BUILD-INFO.txt
           Get-FileHash (Join-Path dist $dll.Name) -Algorithm SHA256 | Format-List | Out-String | Set-Content dist/SHA256.txt
@@ -111,7 +116,7 @@ jobs:
       - name: Upload compiled filter
         uses: actions/upload-artifact@v4
         with:
-          name: potplayer-vsfilter-startpoint-burst-txt-x64
+          name: potplayer-vsfilter-bt709-precheck-experimental-txt-x64
           path: dist/*
           if-no-files-found: error
           retention-days: 30
