@@ -364,10 +364,46 @@ request_replacement = '''    while (_nextOutputFrameNb <= maxRequestOutputFrameN
                 break;
             }
             _outputFrames.emplace(_nextOutputFrameNb, nullptr);
+            _outputRequestTimes.emplace(_nextOutputFrameNb, std::chrono::steady_clock::now());
         }
         AVSF_VPS_API->getFrameAsync(_nextOutputFrameNb, MainFrameServer::GetInstance().GetScriptClip(), VpsGetFrameCallback, this);'''
 if s.count(request_anchor) != 1:
     raise SystemExit("Could not uniquely locate async output request loop; refusing to patch")
 s = s.replace(request_anchor, request_replacement, 1)
+
+# Add request-to-callback timing for slow individual output frames. This records only
+# the async request timestamp and callback latency; it does not change scheduling,
+# queue capacity, delivery order, or the VapourSynth frame-generation request.
+frame_header = root / "vapoursynth_filter/src/frame_handler.h"
+header_anchor = "    std::map<int, AutoReleaseVSFrame> _outputFrames;\\n"
+header_replacement = header_anchor + "    std::map<int, std::chrono::steady_clock::time_point> _outputRequestTimes;\\n"
+h = frame_header.read_text(encoding="utf-8-sig")
+if h.count(header_anchor) != 1:
+    raise SystemExit("Could not uniquely locate output frame map in frame_handler.h")
+frame_header.write_text(h.replace(header_anchor, header_replacement, 1), encoding="utf-8", newline="")
+
+callback_anchor = '''    FrameHandler *frameHandler = static_cast<FrameHandler *>(userData);
+    Environment::GetInstance().Log(L"Output frame %6d is ready, output queue size %2zd", n, frameHandler->_outputFrames.size());'''
+callback_replacement = '''    FrameHandler *frameHandler = static_cast<FrameHandler *>(userData);
+    const auto callbackEntry = std::chrono::steady_clock::now();
+    long long requestToCallbackUs = -1;
+    {
+        const std::unique_lock uniqueOutputLock(frameHandler->_outputMutex);
+        if (const auto requestIter = frameHandler->_outputRequestTimes.find(n);
+            requestIter != frameHandler->_outputRequestTimes.end()) {
+            requestToCallbackUs = static_cast<long long>(
+                std::chrono::duration_cast<std::chrono::microseconds>(callbackEntry - requestIter->second).count());
+            frameHandler->_outputRequestTimes.erase(requestIter);
+        }
+    }
+    if (requestToCallbackUs >= 20000 || f == nullptr) {
+        Environment::GetInstance().Log(
+            L"STARTPOINTDIAG OutputFrame_ready frame %d request_to_callback_us %lld failed %d",
+            n, requestToCallbackUs, f == nullptr);
+    }
+    Environment::GetInstance().Log(L"Output frame %6d is ready, output queue size %2zd", n, frameHandler->_outputFrames.size());'''
+if s.count(callback_anchor) != 1:
+    raise SystemExit("Could not uniquely locate VapourSynth output callback timing anchor")
+s = s.replace(callback_anchor, callback_replacement, 1)
 frame_cpp.write_text(s, encoding="utf-8", newline="")
-print("Patched CAP28 request bound; callback and delivery path left unchanged.")
+print("Patched CAP28 and sparse start-point/output-frame latency diagnostics; frame order and delivery path unchanged.")
