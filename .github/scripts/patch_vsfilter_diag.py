@@ -358,14 +358,6 @@ request_anchor = '''    while (_nextOutputFrameNb <= maxRequestOutputFrameNb) {
         AVSF_VPS_API->getFrameAsync(_nextOutputFrameNb, MainFrameServer::GetInstance().GetScriptClip(), VpsGetFrameCallback, this);'''
 request_replacement = '''    while (_nextOutputFrameNb <= maxRequestOutputFrameNb) {
         // Preserve the tested CAP28 bound while leaving request ordering unchanged.
-        {
-            const std::unique_lock uniqueOutputLock(_outputMutex);
-            if (_outputFrames.size() >= MAX_PENDING_OUTPUT_FRAMES) {
-                break;
-            }
-            _outputFrames.emplace(_nextOutputFrameNb, nullptr);
-            _outputRequestTimes.emplace(_nextOutputFrameNb, std::chrono::steady_clock::now());
-        }
         const int requestedOutputFrameNb = _nextOutputFrameNb;
         {
             const std::unique_lock uniqueOutputLock(_outputMutex);
