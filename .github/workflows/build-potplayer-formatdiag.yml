@@ -1,8 +1,8 @@
-name: Build clean EOF-fixed Release x64 - dual BT709 + CAP28 - no logs
+name: Build source-frame continuity fix - no DShow quality skip - dual BT709 CAP28 EOF
 
 on:
   push:
-    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021, release/bt709-dual-fastpath-cap28-no-logs-20261021, experiment/eof-cap28-drain-20261021, experiment/eof-drain-eos-complete-20261021, experiment/eof-source-bound-shorttail-20261021, experiment/eof-stall-watchdiag-20261021, experiment/eof-dependency-trace-20261021, experiment/eof-duration-deadlock-fix-dlogs-20261021, release/eof-durationfix-dualfastpath-cap28-nolog-20261022]
+    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021, release/bt709-dual-fastpath-cap28-no-logs-20261021, experiment/eof-cap28-drain-20261021, experiment/eof-drain-eos-complete-20261021, experiment/eof-source-bound-shorttail-20261021, experiment/eof-stall-watchdiag-20261021, experiment/eof-dependency-trace-20261021, experiment/eof-duration-deadlock-fix-dlogs-20261021, release/eof-durationfix-dualfastpath-cap28-nolog-20261022, experiment/vsfilter-preserve-decoder-frames-no-dshow-quality-skip-20261022]
   workflow_dispatch:
 
 permissions:
@@ -62,6 +62,13 @@ jobs:
           if ($src -notmatch 'IsOnlyVideoInfo2ControlFlagsChanged\(m_pInput->CurrentMediaType\(\), \*mtIn\)') {
             throw "Tested Precheck metadata-only Fast Path has been lost."
           }
+          if ($src -notmatch '#ifndef AVSF_VAPOURSYNTH\s+if \(ShouldSkipFrame\(pSample\)\)') {
+            throw "VapourSynth still inherits the frame-dropping quality-control path."
+          }
+          if ($src -match 'RAW_RECEIVE|FILTER_SKIP|StartSeekProbe|TraceUpstreamInput') {
+            throw "Old diagnostic instrumentation unexpectedly present."
+          }
+
           if ($frame -notmatch 'MAX_PENDING_OUTPUT_FRAMES = 28' -or $frame -notmatch '_outputFrames.size\(\) >= MAX_PENDING_OUTPUT_FRAMES') {
             throw "CAP28 bound must be retained."
           }
@@ -122,20 +129,20 @@ jobs:
             "Fix: include final source presentation interval in bounded output watermark"
               "No regular Filter log output and no MVUtensils FrameTimingDiag log"
                   "Confirmed bug: VSAPI mapNumElements(-1) for missing duration, not 0; corrected terminal frame check to <= 0"
-            "Clean release: EOFWatch logging sink and file creation removed; no runtime diagnostic output"
+            "Clean experimental x64 release: no diagnostic logfile or additional frame-level tracing"
             "Removed: request/callback QPC diagnostics, additional maps, diagnostic log calls, per-frame telemetry"
             "Disabled: original Environment logfile creation even when configured in INI"
             "Untouched: VapourSynth interpolation script; input/output pixel-format conversion; colorspace updates"
             "Scope: exact VIDEOINFOHEADER2 dwControlFlags 0 to 0x2880A581, other media type changes use upstream behavior"
             "Companion: use non-diagnostic MVUtensils AVX2 DLL to disable its separate FrameTimingDiag log"
-            "Based on successfully runtime-tested EOF duration bugfix, with diagnostic sink disabled"
+            "A/V continuity fix: bypass inherited CVideoTransformFilter::ShouldSkipFrame() in VapourSynth only; retain all source sample PTS and decoded video frames"
           ) | Set-Content dist/BUILD-INFO.txt
           Get-FileHash (Join-Path dist $dll.Name) -Algorithm SHA256 | Format-List | Out-String | Set-Content dist/SHA256.txt
 
       - name: Upload compiled filter
         uses: actions/upload-artifact@v4
         with:
-          name: potplayer-vsfilter-eof-durationfix-dualfastpath-cap28-nolog-release-x64
+          name: potplayer-vsfilter-no-dshow-quality-frame-skip-eof-fixed-4k90-x64
           path: dist/*
           if-no-files-found: error
           retention-days: 30
