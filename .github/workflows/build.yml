@@ -2,7 +2,7 @@ name: Build verified Zen 3 AVX2 tuning
 
 on:
   push:
-    branches: [main, mvu-frame-stage-diag-20261020]
+    branches: [main, mvu-frame-stage-diag-20261020, experiment/mvu-startpoint-stage-20261021]
   workflow_dispatch:
 
 permissions:
