@@ -119,27 +119,28 @@ frame_cpp.write_text(s, encoding="utf-8", newline="")
 
 replace_once(
     frame_cpp,
+    '''    while (_nextOutputFrameNb <= maxRequestOutputFrameNb) {
+        // before every async request to a frame, we need to keep track of the request so that when flushing we can wait for
+        // any pending request to finish before destroying the script
+
+        {
+            const std::unique_lock uniqueOutputLock(_outputMutex);
+
+            _outputFrames.emplace(_nextOutputFrameNb, nullptr);
+        }
+        AVSF_VPS_API->getFrameAsync(_nextOutputFrameNb, MainFrameServer::GetInstance().GetScriptClip(), VpsGetFrameCallback, this);
+
+        _nextOutputFrameNb += 1;
+    }''',
     '''    {
-        // Register newly available output frames, even when CAP28 is full.
+        // Register the highest requestable output frame for this source sample.
+        // Completion of an output frame can now refill CAP28 without new input.
         const std::unique_lock uniqueOutputLock(_outputMutex);
         _maxRequestOutputFrameNb = std::max(_maxRequestOutputFrameNb, maxRequestOutputFrameNb);
     }
     RequestPendingOutputFrames();''',
-    '''    while (_nextOutputFrameNb <= maxRequestOutputFrameNb) {
-        // Limit simultaneously outstanding output frames to the validated CAP28.
-        // Preserve async request and frame delivery ordering.
-        // Save the highest frame number now eligible to be requested.
-        // The worker replenishes the bounded queue as completed frames leave.
-        {
-            const std::unique_lock uniqueOutputLock(_outputMutex);
-            _maxRequestOutputFrameNb = std::max(_maxRequestOutputFrameNb, maxRequestOutputFrameNb);
-        }
-        RequestPendingOutputFrames();
-        break;
-    }''',
     "CAP28 outstanding-output request bound"
 )
-
 
 # CAP28 drain fix: without an input sample after decoder EOS, a queue that
 # became full would never submit remaining output requests. Pump after each
