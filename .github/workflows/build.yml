@@ -2,7 +2,7 @@ name: Build verified Zen 3 AVX2 tuning
 
 on:
   push:
-    branches: [main, mvu-frame-stage-diag-20261020, experiment/mvu-startpoint-stage-20261021, experiment/mvu-burst1400-stage-20261021]
+    branches: [main, mvu-frame-stage-diag-20261020, experiment/mvu-startpoint-stage-20261021, experiment/mvu-burst1400-stage-20261021, experiment/mvu-autoburst-wallcpu-20261021]
   workflow_dispatch:
 
 permissions:
@@ -71,12 +71,54 @@ jobs:
               int detail;
           };
 
+          // Stage timing is inexpensive and enabled for all frame numbers.
+          // The detailed per-tile interpolation measurements remain disabled
+          // until a slow frame is observed, so starting positions may vary.
           inline bool IsTarget(const char *stage, int n) noexcept {
-              if (std::strcmp(stage, "FlowFPS") == 0)
-                  return n >= 1370 && n <= 1580;
-              if (std::strcmp(stage, "Analyse") == 0 || std::strcmp(stage, "Super") == 0)
-                  return n >= 900 && n <= 1080;
+              return n >= 0 &&
+                  (std::strcmp(stage, "FlowFPS") == 0 ||
+                   std::strcmp(stage, "Analyse") == 0 ||
+                   std::strcmp(stage, "Super") == 0);
+          }
+
+          inline std::atomic<int> detailedUntil{-1};
+
+          inline bool IsPhaseTarget(int n) noexcept {
+              // Sparse background baseline, plus a 96-frame window after
+              // a slow output frame. No dependency on the video seek position.
+              return (n >= 0 && n % 180 == 0) ||
+                  (n >= 0 && n <= detailedUntil.load(std::memory_order_relaxed));
+          }
+
+          inline void ExtendPhaseWindow(int n) noexcept {
+              if (n < 100)
+                  return; // initial graph creation is not the target event
+              const int desired = n + 96;
+              int current = detailedUntil.load(std::memory_order_relaxed);
+              while (current < desired &&
+                     !detailedUntil.compare_exchange_weak(current, desired,
+                         std::memory_order_relaxed, std::memory_order_relaxed)) {}
+          }
+
+          inline bool IsSlow(const char *stage, int n, int64_t waitUs, int64_t workUs) noexcept {
+              const bool flow = std::strcmp(stage, "FlowFPS") == 0;
+              if (flow)
+                  return n % 90 == 0 || workUs >= 125000 || waitUs >= 60000 ||
+                         (waitUs >= 0 && waitUs + workUs >= 165000);
+              if (std::strcmp(stage, "Analyse") == 0)
+                  return n % 240 == 0 || workUs >= 65000 || waitUs >= 55000;
+              if (std::strcmp(stage, "Super") == 0)
+                  return n % 240 == 0 || workUs >= 12000 || waitUs >= 40000;
               return false;
+          }
+
+          inline int64_t ThreadCpu100ns() noexcept {
+              FILETIME creation{}, exit{}, kernel{}, user{};
+              if (!GetThreadTimes(GetCurrentThread(), &creation, &exit, &kernel, &user))
+                  return -1;
+              const uint64_t k = (static_cast<uint64_t>(kernel.dwHighDateTime) << 32) | kernel.dwLowDateTime;
+              const uint64_t u = (static_cast<uint64_t>(user.dwHighDateTime) << 32) | user.dwLowDateTime;
+              return static_cast<int64_t>(k + u);
           }
 
           inline int NewInstanceId() noexcept {
@@ -106,14 +148,15 @@ jobs:
           }
 
           inline void Log(const char *stage, int n, int detail,
-                          int64_t waitUs, int64_t workUs) noexcept {
+                          int64_t waitUs, int64_t workUs, int64_t cpuWorkUs) noexcept {
               char line[256];
               const auto tNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
                   Clock::now().time_since_epoch()).count();
               const int length = std::snprintf(line, sizeof(line),
-                  "t_ns=%lld qpc_ticks=%lld stage=%s frame=%d detail=%d wait_us=%lld work_us=%lld\r\n",
+                  "t_ns=%lld qpc_ticks=%lld stage=%s frame=%d detail=%d wait_us=%lld work_us=%lld cpu_work_us=%lld\r\n",
                   static_cast<long long>(tNs), static_cast<long long>(QpcTicks()), stage, n, detail,
-                  static_cast<long long>(waitUs), static_cast<long long>(workUs));
+                  static_cast<long long>(waitUs), static_cast<long long>(workUs),
+                  static_cast<long long>(cpuWorkUs));
               HANDLE handle = LogHandle();
               if (handle == INVALID_HANDLE_VALUE || length <= 0)
                   return;
@@ -159,12 +202,13 @@ jobs:
               RequestStamp *stamp_;
               Clock::time_point workStart_;
               int64_t waitUs_;
+              int64_t cpuStart100ns_;
 
           public:
               Scope(const char *stage, int n, void **frameData, int detail = 0) noexcept
                   : stage_(stage), n_(n), detail_(detail),
                     enabled_(IsTarget(stage, n)), stamp_(nullptr),
-                    workStart_(Clock::now()), waitUs_(-1) {
+                    workStart_(Clock::now()), waitUs_(-1), cpuStart100ns_(ThreadCpu100ns()) {
                   if (!enabled_)
                       return;
                   if (frameData && *frameData) {
@@ -182,7 +226,17 @@ jobs:
                       return;
                   const int64_t workUs = std::chrono::duration_cast<std::chrono::microseconds>(
                       Clock::now() - workStart_).count();
-                  Log(stage_, n_, detail_, waitUs_, workUs);
+                  const int64_t cpuEnd = ThreadCpu100ns();
+                  const int64_t cpuWorkUs = (cpuStart100ns_ >= 0 && cpuEnd >= cpuStart100ns_)
+                      ? (cpuEnd - cpuStart100ns_) / 10 : -1;
+                  const bool flow = std::strcmp(stage_, "FlowFPS") == 0;
+                  if (flow && n_ >= 100 && (workUs >= 125000 || waitUs_ >= 60000 ||
+                      (waitUs_ >= 0 && waitUs_ + workUs >= 165000))) {
+                      ExtendPhaseWindow(n_);
+                  }
+                  if (IsSlow(stage_, n_, waitUs_, workUs)) {
+                      Log(stage_, n_, detail_, waitUs_, workUs, cpuWorkUs);
+                  }
                   delete stamp_;
               }
 
@@ -252,7 +306,7 @@ jobs:
           replace_once(
               'MvuFrameTimingDiag::Scope stageDiag("FlowFPS", n, frameData, d->deltaFrame);\n        VSFrame *dst = nullptr;',
               'MvuFrameTimingDiag::Scope stageDiag("FlowFPS", n, frameData, d->deltaFrame);\n'
-              '        const bool diagFlowTarget = MvuFrameTimingDiag::IsTarget("FlowFPS", n);\n'
+              '        const bool diagFlowTarget = MvuFrameTimingDiag::IsPhaseTarget(n);\n'
               '        auto diagPhaseStart = diagFlowTarget ? MvuFrameTimingDiag::Clock::now() : MvuFrameTimingDiag::Clock::time_point{};\n'
               '        VSFrame *dst = nullptr;',
               "target frame guard")
@@ -469,7 +523,7 @@ jobs:
           p.write_text(s, encoding="utf-8")
           print("Added FlowFPS internal phase timers for vectors, frame setup, masks, and luma/chroma loops.")
 
-          print("Diagnostic windows: Analyse/Super frames 900-1080; FlowFPS frames 1370-1580.")
+          print("Autoburst stage timing: all frame indices, sparse logs for slow stages, detailed phases for next 96 output frames after a slow frame.")
           PY
 
       - name: Apply and commit Zen 3 tuning to AVX2 build variant only
@@ -561,23 +615,28 @@ jobs:
               raise SystemExit(f"Expected one instrumented AVX2 DLL in unpacked wheel; found {len(dlls)}")
 
           readme = """MVUtensils targeted frame-stage timing diagnostic build
-          Build purpose: isolate the delayed frame readiness seen near output frames 2221 and 2249.
+          Build purpose: distinguish VapourSynth dependency waiting, MVUtensils wall-clock work, and per-thread CPU work without relying on a fixed seek position.
           This is an experimental diagnostic DLL, not a normal release.
 
           Installation:
           1. Back up the currently installed mvutensils.avx2.dll.
           2. Replace only that AVX2 DLL with the one in this archive. Keep the other installed MVUtensils files unchanged.
-          3. Reproduce the same PotPlayer playback and allow it to pass media times around 24.69 s and 25.00 s.
+          3. Reproduce the same problem video segment from fixed A and B start times; stop at the shared video timestamp.
           4. Close PotPlayer and find D:\\MVtools\\MVUtensils_FrameTimingDiag_<PID>.txt, then share that log.
 
-          Recorded frame windows:
-          - Analyse and Super: frames 900 through 1080.
-          - FlowFPS: frames 1370 through 1580.
+          Dynamic probe:
+          - All output indices are eligible (A and B can start at different media positions).
+          - FlowFPS logs each 90th frame and slow frames: total >= 165 ms, waiting >= 60 ms, or work >= 125 ms.
+          - Analyse and Super log sparse baseline samples and slow frames only.
+          - After any slow FlowFPS frame beyond frame 100, enable detailed phase logging for the next 96 indices.
+          - Per-thread CPU time cpu_work_us distinguishes preemption/blocking during work from actual on-core computation.
           - qpc_ticks: QueryPerformanceCounter clock shared with the companion Filter diagnostic (stage end).
+          - No interpolation codepaths, cache limits, frame order, or configured FPS are changed.
 
           Log fields:
           - wait_us: elapsed wall time from VapourSynth's arInitial request until arAllFramesReady, including waiting for dependent clips/frames.
           - work_us: elapsed wall time inside the filter's arAllFramesReady processing.
+          - cpu_work_us: thread user+kernel CPU time during arAllFramesReady, excludes time off CPU.
           - Analyse detail: delta direction (+1/-1).
           - Super detail: instance ID, to distinguish multiple Super nodes.
           - FlowFPS detail: delta frame setting.
@@ -587,7 +646,7 @@ jobs:
           """
           readme = "\n".join(line.strip() for line in readme.splitlines()).strip() + "\n"
 
-          out = root / "MVUtensils-Burst1400-FrameTimingDiag-AVX2.zip"
+          out = root / "MVUtensils-AutoBurst-WallCpuDiag-AVX2.zip"
           with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as z:
               z.write(dlls[0], "mvutensils.avx2.dll")
               z.writestr("README.txt", readme)
@@ -597,7 +656,7 @@ jobs:
       - name: Upload verified Windows build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: mvutensils-burst1400-znver3-diagnostic-x64
+          name: mvutensils-autoburst-wallcpu-znver3-x64
           path: dist/*
           if-no-files-found: error
           retention-days: 14
