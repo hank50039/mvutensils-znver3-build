@@ -452,4 +452,29 @@ replace_once(
     "Change VapourSynth Filter diagnostic log output extension to .txt",
 )
 
-print("Patched CAP28 and sparse start-point/output-frame latency diagnostics; frame order and delivery path unchanged; log extension .txt.")
+# Experimental optimization, added only to the isolated branch, after the
+# original diagnostic source has been prepared. The upstream filter validates
+# dynamically attached input media types by reloading the auxiliary script
+# before it can reach Receive(). If literally nothing except the validated
+# VIDEOINFOHEADER2 control flags changed, input dimensions, pixel data,
+# timestamps, and output pin/renderer media type do not change. In this exact
+# case, the currently connected input type remains acceptable.
+precheck_anchor = '''auto CSynthFilter::CheckInputType(const CMediaType *mtIn) -> HRESULT {
+    bool result = false;'''
+precheck_replacement = '''auto CSynthFilter::CheckInputType(const CMediaType *mtIn) -> HRESULT {
+    // The narrow metadata-only input transition is already accepted and
+    // applied in Receive(): avoid creating three temporary auxiliary scripts
+    // just to validate the same unchanged pixel layout. All other format
+    // changes use the full upstream media-type negotiation.
+    if (mtIn != nullptr && IsActive() && m_pInput->IsConnected() &&
+        !_isInputMediaTypeChanged && !_needReloadScript &&
+        IsOnlyVideoInfo2ControlFlagsChanged(m_pInput->CurrentMediaType(), *mtIn)) {
+        Environment::GetInstance().Log(
+            L"DYNAMIC_MT_PRECHECK_FASTPATH accepted_exact_bt709_control_flags_without_aux_script");
+        return S_OK;
+    }
+    bool result = false;'''
+replace_once(filter_cpp, precheck_anchor, precheck_replacement,
+             "Skip redundant active input media-type probes for exact metadata-only BT.709 transition")
+
+print("Patched CAP28 and sparse start-point/output-frame latency diagnostics; frame order and delivery path unchanged; log extension .txt; narrow precheck fastpath.")
