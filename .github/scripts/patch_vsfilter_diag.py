@@ -1099,9 +1099,9 @@ assert "_wfsopen" not in modified["environment"]
 assert "EOF_DURATION_BEFORE" in modified["frame"]
 assert "EOF_DURATION_AFTER" in modified["frame"]
 assert 'inline auto EofWatch(bool, const wchar_t*, ...) noexcept -> void {}' in modified["frame"]
-assert "CreateDirectoryW" not in modified["frame"]
-assert "_wfopen_s" not in modified["frame"]
-assert "QueryPerformanceCounter" not in modified["frame"]
+assert "CreateDirectoryW" in modified["frame"]
+assert "_wfopen_s" in modified["frame"]
+assert "QueryPerformanceCounter" in modified["frame"]
 assert "VapourSynth_EOFWatch_" not in modified["frame"]
 assert "SOURCE_WAIT_TIMEOUT" in modified["frame"]
 assert "FLUSH_SIGNAL" in modified["frame"]
@@ -1111,4 +1111,9 @@ for tag in ("STARTPOINTDIAG", "RECVTRACE", "FORMAT_DIFF", "DYNAMIC_MT_FASTPATH",
     if any(tag in x for x in modified.values()):
         raise SystemExit("Unexpected diagnostic marker remains: " + tag)
 
-print("Release verified: EOF duration fix, both BT.709 Fast Paths and CAP28 kept; EOFWatch file sink disabled, no diagnostic logs.")
+assert "VapourSynth_StartSeek_" in modified["frame"]
+assert "StartSeekDump();" in modified["frame"]
+assert "DELIVER_BEGIN" in modified["frame"]
+assert "SOURCE_INPUT" in modified["frame"]
+assert "OUTPUT_READY" in modified["frame"]
+print("StartSeek clock probe verified: EOF fix + dual Fast Paths + CAP28 retained; bounded QPC trace enabled; EOFWatch disabled.")
