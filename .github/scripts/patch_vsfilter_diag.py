@@ -439,6 +439,244 @@ replace_once(
     "Guard empty end-of-stream source while flushing"
 )
 
+
+# EOF-only diagnostic build. No hot-path telemetry before decoder EOS; save
+# failure events unconditionally. Readable trace in %TEMP%\VapourSynth_EOFWatch_<PID>.txt.
+# Does not alter queue, interpolation, output ordering or EOS behavior.
+replace_once(
+    frame_cpp,
+    '''#include "frame_handler.h"
+
+#include "constants.h"''',
+    '''#include "frame_handler.h"
+
+#include <cstdarg>
+#include <cstdio>
+#include <cwchar>
+
+#include "constants.h"''',
+    "Include EOF-only watchdog CRT helpers"
+)
+replace_once(
+    frame_cpp,
+    '''namespace {
+constexpr size_t MAX_PENDING_OUTPUT_FRAMES = 28;
+}''',
+    r'''namespace {
+constexpr size_t MAX_PENDING_OUTPUT_FRAMES = 28;
+
+// Disabled during normal playback. Only near EOS or on actual output error.
+// This diagnostic output is independent from Environment::Log(), which stays off.
+std::atomic<bool> g_eofWatchEnabled{false};
+std::mutex g_eofWatchMutex;
+FILE *g_eofWatchFile = nullptr;
+
+auto EofWatch(bool always, const wchar_t *fmt, ...) noexcept -> void {
+    if (!always && !g_eofWatchEnabled.load(std::memory_order_acquire)) {
+        return;
+    }
+    const std::scoped_lock lock(g_eofWatchMutex);
+    if (g_eofWatchFile == nullptr) {
+        wchar_t dir[MAX_PATH]{};
+        wchar_t filename[MAX_PATH]{};
+        const DWORD len = GetTempPathW(MAX_PATH, dir);
+        if (len == 0 || len >= MAX_PATH) {
+            return;
+        }
+        swprintf_s(filename, L"%lsVapourSynth_EOFWatch_%lu.txt", dir, GetCurrentProcessId());
+        if (_wfopen_s(&g_eofWatchFile, filename, L"w") != 0 || g_eofWatchFile == nullptr) {
+            return;
+        }
+        fwprintf_s(g_eofWatchFile, L"EOFWatch build: source+output state; all ticks QueryPerformanceCounter. File=%ls\\n", filename);
+    }
+    LARGE_INTEGER tick{};
+    QueryPerformanceCounter(&tick);
+    fwprintf_s(g_eofWatchFile, L"qpc=%lld tid=%lu ", static_cast<long long>(tick.QuadPart), GetCurrentThreadId());
+    va_list ap;
+    va_start(ap, fmt);
+    vfwprintf_s(g_eofWatchFile, fmt, ap);
+    va_end(ap);
+    fwprintf_s(g_eofWatchFile, L"\\n");
+    fflush(g_eofWatchFile);
+}
+}''',
+    "Insert EOF-only watchdog sink"
+)
+replace_once(
+    frame_cpp,
+    '''auto FrameHandler::SignalInputEndOfStream() -> void {
+    // Normal startup''',
+    '''auto FrameHandler::SignalInputEndOfStream() -> void {
+    g_eofWatchEnabled.store(true, std::memory_order_release);
+    EofWatch(true, L"INPUT_EOS_ENTER source_received=%d next_requested=%d last_delivered=%d",
+             _nextSourceFrameNb, _nextOutputFrameNb, _nextDeliveryFrameNb);
+    // Normal startup''',
+    "Record precise decoder EOS entry"
+)
+replace_once(
+    frame_cpp,
+    '''    // Continue draining the final eligible frames even though the decoder
+    // will never call AddInputSample again.
+    RequestPendingOutputFrames();''',
+    '''    // Continue draining the final eligible frames even though the decoder
+    // will never call AddInputSample again.
+    {
+        const std::shared_lock lock(_outputMutex);
+        int emptyCount = 0;
+        for (const auto &[id, frame] : _outputFrames) {
+            if (frame.frame == nullptr) ++emptyCount;
+        }
+        EofWatch(false, L"INPUT_EOS_STATE received=%d output_next=%d watermark=%d delivery_next=%d queued=%zu incomplete=%d",
+                 _nextSourceFrameNb, _nextOutputFrameNb, _maxRequestOutputFrameNb,
+                 _nextDeliveryFrameNb, _outputFrames.size(), emptyCount);
+    }
+    RequestPendingOutputFrames();''',
+    "Record queued work at EOS"
+)
+replace_once(
+    frame_cpp,
+    '''    if (deliverEos && !_isFlushing && !_isStopping) {
+        _filter.m_pOutput->DeliverEndOfStream();
+    }''',
+    '''    if (deliverEos && !_isFlushing && !_isStopping) {
+        EofWatch(false, L"EOS_SEND next_request=%d watermark=%d next_delivery=%d",
+                 _nextOutputFrameNb, _maxRequestOutputFrameNb, _nextDeliveryFrameNb);
+        const HRESULT eosHr = _filter.m_pOutput->DeliverEndOfStream();
+        EofWatch(false, L"EOS_SEND_RESULT hr=0x%08lX", static_cast<unsigned long>(eosHr));
+    }''',
+    "Confirm eventual downstream EOS"
+)
+replace_once(
+    frame_cpp,
+    '''    if (f == nullptr) {
+        Environment::GetInstance().Log(L"Fail to generate output frame %6d with message: %hs", n, errorMsg);
+    }''',
+    '''    if (f == nullptr) {
+        Environment::GetInstance().Log(L"Fail to generate output frame %6d with message: %hs", n, errorMsg);
+        EofWatch(true, L"CALLBACK_FAILURE frame=%d error=%hs", n,
+                 errorMsg != nullptr ? errorMsg : "(null)");
+    }''',
+    "Catch null output frame even before EOS"
+)
+replace_once(
+    frame_cpp,
+    '''                if (prevFrameIter == frameHandler->_outputFrames.end()) {
+                    return;
+                } else {
+                    f = AVSF_VPS_API->addFrameRef(prevFrameIter->second.frame);''',
+    '''                if (prevFrameIter == frameHandler->_outputFrames.end()) {
+                    EofWatch(true, L"CALLBACK_LOST_FAILED_FRAME frame=%d previous=%d already_delivered_or_missing=1",
+                             n, n - 1);
+                    return;
+                } else {
+                    if (prevFrameIter->second.frame == nullptr) {
+                        EofWatch(true, L"CALLBACK_PREVIOUS_UNREADY frame=%d previous=%d", n, n - 1);
+                    }
+                    f = AVSF_VPS_API->addFrameRef(prevFrameIter->second.frame);''',
+    "Capture unfillable callback placeholders"
+)
+replace_once(
+    frame_cpp,
+    '''        frameHandler->_deliverSampleCv.notify_all();
+    }
+
+    frameHandler->_flushOutputSampleCv.notify_all();''',
+    '''        frameHandler->_deliverSampleCv.notify_all();
+    }
+    EofWatch(false, L"OUTPUT_CALLBACK frame=%d success=%d", n, f != nullptr);
+
+    frameHandler->_flushOutputSampleCv.notify_all();''',
+    "Trace output callbacks only after source EOS"
+)
+replace_once(
+    frame_cpp,
+    '''    while (!_isFlushing && !_isStopping) {
+        int n;''',
+    '''    while (!_isFlushing && !_isStopping) {
+        int n;''',
+    "Retain request-pump invariants"
+)
+replace_once(
+    frame_cpp,
+    '''        AVSF_VPS_API->getFrameAsync(n, MainFrameServer::GetInstance().GetScriptClip(),
+                                  VpsGetFrameCallback, this);
+    }
+}''',
+    '''        EofWatch(false, L"OUTPUT_REQUEST frame=%d", n);
+        AVSF_VPS_API->getFrameAsync(n, MainFrameServer::GetInstance().GetScriptClip(),
+                                  VpsGetFrameCallback, this);
+    }
+}''',
+    "Trace new requests only after EOS"
+)
+replace_once(
+    frame_cpp,
+    '''        if (_isFlushing) {
+            continue;
+        }
+
+        const VSMap *frameProps =''',
+    '''        if (_isFlushing) {
+            continue;
+        }
+        EofWatch(false, L"OUTPUT_DELIVER_BEGIN frame=%d", iter->first);
+
+        const VSMap *frameProps =''',
+    "Track delivery progress at EOF"
+)
+replace_once(
+    frame_cpp,
+    '''        GarbageCollect(sourceFrameNb - 1);
+        _nextDeliveryFrameNb += 1;
+
+        // Critical at end-of-stream:''',
+    '''        GarbageCollect(sourceFrameNb - 1);
+        _nextDeliveryFrameNb += 1;
+        EofWatch(false, L"OUTPUT_DELIVER_DONE frame=%d source=%d next_delivery=%d",
+                 _nextDeliveryFrameNb - 1, sourceFrameNb, _nextDeliveryFrameNb);
+
+        // Critical at end-of-stream:''',
+    "Track completed delivery at EOF"
+)
+replace_once(
+    frame_cpp,
+    '''            _deliverSampleCv.wait(sharedOutputLock, [this, &iter]() -> bool {
+                if (_isFlushing) {
+                    return true;
+                }
+
+                iter = _outputFrames.find(_nextDeliveryFrameNb);
+                if (iter == _outputFrames.end()) {
+                    return false;
+                }
+
+                return iter->second.frame != nullptr;
+            });''',
+    '''            const bool isReady = _deliverSampleCv.wait_for(
+                sharedOutputLock, std::chrono::milliseconds(750), [this, &iter]() -> bool {
+                    if (_isFlushing) {
+                        return true;
+                    }
+                    iter = _outputFrames.find(_nextDeliveryFrameNb);
+                    return iter != _outputFrames.end() && iter->second.frame != nullptr;
+                });
+            if (!isReady) {
+                if (_inputEosSeen.load(std::memory_order_acquire)) {
+                    int firstNull = -1, firstReady = -1;
+                    for (const auto &[n, item] : _outputFrames) {
+                        if (item.frame == nullptr && firstNull < 0) firstNull = n;
+                        if (item.frame != nullptr && firstReady < 0) firstReady = n;
+                    }
+                    EofWatch(false,
+                        L"EOS_WAIT_TIMEOUT next_delivery=%d next_request=%d max_request=%d map=%zu first_null=%d first_ready=%d",
+                        _nextDeliveryFrameNb, _nextOutputFrameNb, _maxRequestOutputFrameNb,
+                        _outputFrames.size(), firstNull, firstReady);
+                }
+                continue;
+            }''',
+    "Watchdog for stuck delivery head of line without changing output request order"
+)
+
 # Disable the built-in logfile as well, even if a stale LogFile= entry
 # remains in the user's existing INI/registry settings. No settings are
 # changed and no runtime logfile is opened. Calls to Environment::Log
@@ -473,8 +711,10 @@ assert "_inputEosSeen.store(true, std::memory_order_release)" in modified["frame
 assert "_nextSourceFrameNb < Environment::GetInstance().GetInitialSrcBuffer()" in modified["frame"]
 assert "_outputRequestTimes" not in modified["frame"]
 assert "_wfsopen" not in modified["environment"]
+assert "EOS_WAIT_TIMEOUT" in modified["frame"]
+assert "CALLBACK_LOST_FAILED_FRAME" in modified["frame"]
 for tag in ("STARTPOINTDIAG", "RECVTRACE", "FORMAT_DIFF", "DYNAMIC_MT_FASTPATH", "DYNAMIC_MT_PRECHECK_FASTPATH", "CAP28DIAG"):
     if any(tag in x for x in modified.values()):
         raise SystemExit("Unexpected diagnostic marker remains: " + tag)
 
-print("EOF patch: dual Fast Paths + CAP28 refill + last-source lookahead + short-tail script startup + bounded EOS; no runtime logs.")
+print("EOF-only diagnostic: optimized dual Fast Paths + CAP28; regular logs disabled, narrow %TEMP% EOFWatch only.")
