@@ -365,17 +365,23 @@ request_replacement = '''    while (_nextOutputFrameNb <= maxRequestOutputFrameN
                 break;
             }
             _outputFrames.emplace(requestedOutputFrameNb, nullptr);
-            _outputRequestTimes.emplace(requestedOutputFrameNb, std::chrono::steady_clock::now());
+            const auto frameRequestTime = std::chrono::steady_clock::now();
+            _outputRequestTimes.emplace(requestedOutputFrameNb, frameRequestTime);
         }
         const auto getFrameAsyncStart = std::chrono::steady_clock::now();
         AVSF_VPS_API->getFrameAsync(requestedOutputFrameNb, MainFrameServer::GetInstance().GetScriptClip(), VpsGetFrameCallback, this);
         const long long getFrameAsyncUs = static_cast<long long>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - getFrameAsyncStart).count());
-        if (getFrameAsyncUs >= 5000) {
+        if (getFrameAsyncUs >= 5000 || (requestedOutputFrameNb >= 2120 && requestedOutputFrameNb <= 2260)) {
+            // The request timestamp is read from the map while holding the same mutex used by the callback.
+            // If a callback already completed, the map entry may be gone; use getFrameAsyncStart
+            // as a closely adjacent but unambiguous fallback. No additional map writes or order changes.
+            const auto submitTNs = static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                getFrameAsyncStart.time_since_epoch()).count());
             Environment::GetInstance().Log(
-                L"STARTPOINTDIAG OutputFrame_submit frame %d getframeasync_us %lld",
-                requestedOutputFrameNb, getFrameAsyncUs);
+                L"STARTPOINTDIAG OutputFrame_submit frame %d getframeasync_us %lld submit_t_ns %lld",
+                requestedOutputFrameNb, getFrameAsyncUs, submitTNs);
         }'''
 if s.count(request_anchor) != 1:
     raise SystemExit("Could not uniquely locate async output request loop; refusing to patch")
@@ -397,6 +403,8 @@ callback_anchor = '''    FrameHandler *frameHandler = static_cast<FrameHandler *
 callback_replacement = '''    FrameHandler *frameHandler = static_cast<FrameHandler *>(userData);
     const auto callbackEntry = std::chrono::steady_clock::now();
     long long requestToCallbackUs = -1;
+    long long requestTNs = -1;
+    const auto callbackTNs = static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(callbackEntry.time_since_epoch()).count());
     const auto callbackLockBegin = std::chrono::steady_clock::now();
     {
         const std::unique_lock uniqueOutputLock(frameHandler->_outputMutex);
@@ -404,6 +412,7 @@ callback_replacement = '''    FrameHandler *frameHandler = static_cast<FrameHand
             requestIter != frameHandler->_outputRequestTimes.end()) {
             requestToCallbackUs = static_cast<long long>(
                 std::chrono::duration_cast<std::chrono::microseconds>(callbackEntry - requestIter->second).count());
+            requestTNs = static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(requestIter->second.time_since_epoch()).count());
             frameHandler->_outputRequestTimes.erase(requestIter);
         }
     }
@@ -415,10 +424,10 @@ callback_replacement = '''    FrameHandler *frameHandler = static_cast<FrameHand
             L"STARTPOINTDIAG OutputFrame_callback_lock frame %d lock_lookup_us %lld",
             n, callbackLockLookupUs);
     }
-    if (requestToCallbackUs >= 20000 || f == nullptr) {
+    if (requestToCallbackUs >= 20000 || f == nullptr || (n >= 2120 && n <= 2260)) {
         Environment::GetInstance().Log(
-            L"STARTPOINTDIAG OutputFrame_ready frame %d request_to_callback_us %lld failed %d",
-            n, requestToCallbackUs, f == nullptr);
+            L"STARTPOINTDIAG OutputFrame_ready frame %d request_to_callback_us %lld failed %d request_t_ns %lld callback_t_ns %lld",
+            n, requestToCallbackUs, f == nullptr, requestTNs, callbackTNs);
     }
     Environment::GetInstance().Log(L"Output frame %6d is ready, output queue size %2zd", n, frameHandler->_outputFrames.size());'''
 if s.count(callback_anchor) != 1:
