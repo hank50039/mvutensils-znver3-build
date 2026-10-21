@@ -816,6 +816,34 @@ replace_once(
 )
 
 
+# Produce a no-diagnostics release from the EXACT EOF-fix patch that passed
+# runtime testing. Only disable the EOFWatch output sink and enable flag.
+# All verified EOS, CAP28, BT.709, interpolation and wait behavior is unchanged.
+release_cpp = frame_cpp.read_text(encoding="utf-8")
+sink_anchor = "// Disabled during normal playback. Only near EOS or on actual output error."
+sink_tail = "    fflush(g_eofWatchFile);\n}"
+if release_cpp.count(sink_anchor) != 1 or release_cpp.count(sink_tail) != 1:
+    raise SystemExit("EOFWatch implementation changed; refusing unsafe release build")
+sink_start = release_cpp.index(sink_anchor)
+sink_end = release_cpp.index(sink_tail, sink_start) + len(sink_tail)
+release_cpp = (
+    release_cpp[:sink_start]
+    + "// Clean production release: no diagnostic file output.\n"
+    + "inline auto EofWatch(bool, const wchar_t*, ...) noexcept -> void {}\n"
+    + release_cpp[sink_end:]
+)
+enable_marker = "    g_eofWatchEnabled.store(true, std::memory_order_release);\n"
+if release_cpp.count(enable_marker) != 1:
+    raise SystemExit("EOFWatch activation changed; refusing unsafe release build")
+release_cpp = release_cpp.replace(enable_marker, "", 1)
+frame_cpp.write_text(release_cpp, encoding="utf-8", newline="")
+if any(token in release_cpp for token in (
+    "CreateDirectoryW", "_wfopen_s", "fwprintf_s", "vfwprintf_s",
+    "QueryPerformanceCounter", "g_eofWatchFile", "g_eofWatchEnabled",
+    "VapourSynth_EOFWatch_"
+)):
+    raise SystemExit("EOFWatch file sink was not completely disabled")
+
 # Regression fix after detailed EOF logs confirmed the final frame 203 was
 # present, but SourceGetFrame(203/204/205) waited until shutdown. VSAPI's
 # mapNumElements() returns -1 when a duration key does not exist. Earlier code
@@ -858,7 +886,11 @@ assert "_outputRequestTimes" not in modified["frame"]
 assert "_wfsopen" not in modified["environment"]
 assert "EOF_DURATION_BEFORE" in modified["frame"]
 assert "EOF_DURATION_AFTER" in modified["frame"]
-assert "D:\\\\SynthFilters\\\\VapourSynth_EOFWatch_" in modified["frame"]
+assert 'inline auto EofWatch(bool, const wchar_t*, ...) noexcept -> void {}' in modified["frame"]
+assert "CreateDirectoryW" not in modified["frame"]
+assert "_wfopen_s" not in modified["frame"]
+assert "QueryPerformanceCounter" not in modified["frame"]
+assert "VapourSynth_EOFWatch_" not in modified["frame"]
 assert "SOURCE_WAIT_TIMEOUT" in modified["frame"]
 assert "FLUSH_SIGNAL" in modified["frame"]
 assert "EOS_WAIT_TIMEOUT" in modified["frame"]
@@ -867,4 +899,4 @@ for tag in ("STARTPOINTDIAG", "RECVTRACE", "FORMAT_DIFF", "DYNAMIC_MT_FASTPATH",
     if any(tag in x for x in modified.values()):
         raise SystemExit("Unexpected diagnostic marker remains: " + tag)
 
-print("EOF fix: absent terminal duration keys (VSAPI -1) repaired; EOFWatch now writes to D:\\SynthFilters; dual Fast Paths + CAP28 preserved.")
+print("Release verified: EOF duration fix, both BT.709 Fast Paths and CAP28 kept; EOFWatch file sink disabled, no diagnostic logs.")
