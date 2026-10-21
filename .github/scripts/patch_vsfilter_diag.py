@@ -246,10 +246,18 @@ auto CSynthFilter::BeginFlush() -> HRESULT {''',
 )
 replace_once(
     root / "vapoursynth_filter/src/frame_handler.h",
+    '''    auto GetSourceFrame(int frameNb) -> const VSFrame *;
+    auto BeginFlush() -> void;''',
+    '''    auto GetSourceFrame(int frameNb) -> const VSFrame *;
+    auto SignalInputEndOfStream() -> void;
+    auto BeginFlush() -> void;''',
+    "Expose EOS notification to owning filter"
+)
+replace_once(
+    root / "vapoursynth_filter/src/frame_handler.h",
     '''    auto RequestPendingOutputFrames() -> void;
     auto GarbageCollect(int srcFrameNb) -> void;''',
     '''    auto RequestPendingOutputFrames() -> void;
-    auto SignalInputEndOfStream() -> void;
     auto DeliverEndOfStreamIfDrained() -> void;
     auto GarbageCollect(int srcFrameNb) -> void;''',
     "Queue-drained end-of-stream declarations"
