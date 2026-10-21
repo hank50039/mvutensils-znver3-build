@@ -440,4 +440,16 @@ if s.count(callback_anchor) != 1:
     raise SystemExit("Could not uniquely locate VapourSynth output callback timing anchor")
 s = s.replace(callback_anchor, callback_replacement, 1)
 frame_cpp.write_text(s, encoding="utf-8", newline="")
-print("Patched CAP28 and sparse start-point/output-frame latency diagnostics; frame order and delivery path unchanged.")
+
+# Diagnostic build only: write the existing configured log path with a .txt extension.
+# This changes neither the log contents nor frame processing, and does not update
+# the user's INI/registry setting.
+environment_cpp = root / "filter_common/src/environment.cpp"
+replace_once(
+    environment_cpp,
+    '    if (!_logPath.empty()) {\n        _logFile = _wfsopen(_logPath.c_str(), L"w", _SH_DENYNO);',
+    '    if (!_logPath.empty()) {\n        _logPath.replace_extension(L".txt");\n        _logFile = _wfsopen(_logPath.c_str(), L"w", _SH_DENYNO);',
+    "Change VapourSynth Filter diagnostic log output extension to .txt",
+)
+
+print("Patched CAP28 and sparse start-point/output-frame latency diagnostics; frame order and delivery path unchanged; log extension .txt.")
