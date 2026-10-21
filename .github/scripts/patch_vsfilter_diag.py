@@ -487,7 +487,7 @@ auto EofWatch(bool always, const wchar_t *fmt, ...) noexcept -> void {
         if (_wfopen_s(&g_eofWatchFile, filename, L"w") != 0 || g_eofWatchFile == nullptr) {
             return;
         }
-        fwprintf_s(g_eofWatchFile, L"EOFWatch build: source+output state; all ticks QueryPerformanceCounter. File=%ls\\n", filename);
+        fwprintf_s(g_eofWatchFile, L"EOFWatch build: source+output state; all ticks QueryPerformanceCounter. File=%ls\n", filename);
     }
     LARGE_INTEGER tick{};
     QueryPerformanceCounter(&tick);
@@ -496,7 +496,7 @@ auto EofWatch(bool always, const wchar_t *fmt, ...) noexcept -> void {
     va_start(ap, fmt);
     vfwprintf_s(g_eofWatchFile, fmt, ap);
     va_end(ap);
-    fwprintf_s(g_eofWatchFile, L"\\n");
+    fwprintf_s(g_eofWatchFile, L"\n");
     fflush(g_eofWatchFile);
 }
 }''',
@@ -717,6 +717,90 @@ replace_once(
     "Measure generated output PTS near EOS"
 )
 
+
+# Targeted follow-up to EOFWatch: distinguish a missing/blocked source frame
+# from an expensive downstream FlowFPS callback. This is a DIAGNOSTIC only,
+# and preserves all original wait predicates, frame ordering and interpolation.
+replace_once(
+    frame_cpp,
+    '''auto FrameHandler::BeginFlush() -> void {
+    Environment::GetInstance().Log(L"FrameHandler start BeginFlush()");''',
+    '''auto FrameHandler::BeginFlush() -> void {
+    EofWatch(true, L"FLUSH_BEGIN next_source=%d next_request=%d next_delivery=%d",
+             _nextSourceFrameNb, _nextOutputFrameNb, _nextDeliveryFrameNb);
+    Environment::GetInstance().Log(L"FrameHandler start BeginFlush()");''',
+    "Identify whether last callbacks were released only during shutdown"
+)
+replace_once(
+    frame_cpp,
+    '''auto FrameHandler::GetSourceFrame(int frameNb) -> const VSFrame * {
+    Environment::GetInstance().Log(L"Wait for source frame: frameNb %6d input queue size %2zd", frameNb, _sourceFrames.size());
+
+    std::shared_lock sharedSourceLock(_sourceMutex);''',
+    '''auto FrameHandler::GetSourceFrame(int frameNb) -> const VSFrame * {
+    Environment::GetInstance().Log(L"Wait for source frame: frameNb %6d input queue size %2zd", frameNb, _sourceFrames.size());
+
+    const auto sourceQueryStart = std::chrono::steady_clock::now();
+    std::shared_lock sharedSourceLock(_sourceMutex);
+    if (_inputEosSeen.load(std::memory_order_acquire) &&
+        (frameNb >= _nextSourceFrameNb - 6 || _sourceFrames.empty())) {
+        EofWatch(false, L"SOURCE_REQ frame=%d oldest=%d latest=%d eos=1 flush=%d",
+                 frameNb,
+                 _sourceFrames.empty() ? -1 : _sourceFrames.begin()->first,
+                 _sourceFrames.empty() ? -1 : _sourceFrames.rbegin()->first,
+                 static_cast<int>(_isFlushing.load()));
+    }''',
+    "Trace actual late source lookahead queries"
+)
+replace_once(
+    frame_cpp,
+    '''    _newSourceFrameCv.wait(sharedSourceLock, [this, &iter, frameNb]() -> bool {''',
+    '''    while (!_newSourceFrameCv.wait_for(sharedSourceLock, std::chrono::milliseconds(750),
+                                          [this, &iter, frameNb]() -> bool {''',
+    "Log long waits for source frames required by the final output"
+)
+replace_once(
+    frame_cpp,
+    '''        return AVSF_VPS_API->mapNumElements(frameProps, FRAME_PROP_NAME_DURATION_NUM) > 0 && AVSF_VPS_API->mapNumElements(frameProps, FRAME_PROP_NAME_DURATION_DEN) > 0;
+    });
+
+    if (_isFlushing || _sourceFrames.empty()) {''',
+    '''        return AVSF_VPS_API->mapNumElements(frameProps, FRAME_PROP_NAME_DURATION_NUM) > 0 && AVSF_VPS_API->mapNumElements(frameProps, FRAME_PROP_NAME_DURATION_DEN) > 0;
+    })) {
+        if (_inputEosSeen.load(std::memory_order_acquire)) {
+            EofWatch(false, L"SOURCE_WAIT_TIMEOUT requested=%d oldest=%d latest=%d size=%zu eos=1 flushing=%d",
+                frameNb, _sourceFrames.empty() ? -1 : _sourceFrames.begin()->first,
+                _sourceFrames.empty() ? -1 : _sourceFrames.rbegin()->first,
+                _sourceFrames.size(), static_cast<int>(_isFlushing.load()));
+        }
+    }
+    const auto sourceWaitUs = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - sourceQueryStart).count();
+    if (_inputEosSeen.load(std::memory_order_acquire) &&
+        (sourceWaitUs > 100000 || frameNb >= _nextSourceFrameNb - 6)) {
+        EofWatch(false, L"SOURCE_RESULT requested=%d resolved=%d waited_us=%lld oldest=%d latest=%d",
+                 frameNb, _sourceFrames.empty() ? -1 : iter->first,
+                 static_cast<long long>(sourceWaitUs),
+                 _sourceFrames.empty() ? -1 : _sourceFrames.begin()->first,
+                 _sourceFrames.empty() ? -1 : _sourceFrames.rbegin()->first);
+    }
+
+    if (_isFlushing || _sourceFrames.empty()) {''',
+    "Source-frame dependencies after EOF, including timeout and resolution"
+)
+replace_once(
+    frame_cpp,
+    '''    _isFlushing = true;
+
+    _addInputSampleCv.notify_all();''',
+    '''    _isFlushing = true;
+    EofWatch(true, L"FLUSH_SIGNAL source=%d request=%d delivery=%d",
+             _nextSourceFrameNb, _nextOutputFrameNb, _nextDeliveryFrameNb);
+
+    _addInputSampleCv.notify_all();''',
+    "Correlate flush signal and release of pending callbacks"
+)
+
 # Disable the built-in logfile as well, even if a stale LogFile= entry
 # remains in the user's existing INI/registry settings. No settings are
 # changed and no runtime logfile is opened. Calls to Environment::Log
@@ -751,10 +835,12 @@ assert "_inputEosSeen.store(true, std::memory_order_release)" in modified["frame
 assert "_nextSourceFrameNb < Environment::GetInstance().GetInitialSrcBuffer()" in modified["frame"]
 assert "_outputRequestTimes" not in modified["frame"]
 assert "_wfsopen" not in modified["environment"]
+assert "SOURCE_WAIT_TIMEOUT" in modified["frame"]
+assert "FLUSH_SIGNAL" in modified["frame"]
 assert "EOS_WAIT_TIMEOUT" in modified["frame"]
 assert "CALLBACK_LOST_FAILED_FRAME" in modified["frame"]
 for tag in ("STARTPOINTDIAG", "RECVTRACE", "FORMAT_DIFF", "DYNAMIC_MT_FASTPATH", "DYNAMIC_MT_PRECHECK_FASTPATH", "CAP28DIAG"):
     if any(tag in x for x in modified.values()):
         raise SystemExit("Unexpected diagnostic marker remains: " + tag)
 
-print("EOF-only diagnostic: optimized dual Fast Paths + CAP28; regular logs disabled, narrow %TEMP% EOFWatch only.")
+print("EOF source-dependency diagnostic: dual Fast Paths + CAP28, narrow multi-line %TEMP% EOFWatch, no normal logging.")
