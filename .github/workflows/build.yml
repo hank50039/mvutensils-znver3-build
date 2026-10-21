@@ -73,9 +73,9 @@ jobs:
 
           inline bool IsTarget(const char *stage, int n) noexcept {
               if (std::strcmp(stage, "FlowFPS") == 0)
-                  return n >= 2180 && n <= 2280;
+                  return n >= 2100 && n <= 2300;
               if (std::strcmp(stage, "Analyse") == 0 || std::strcmp(stage, "Super") == 0)
-                  return n >= 1430 && n <= 1530;
+                  return n >= 1350 && n <= 1550;
               return false;
           }
 
@@ -100,14 +100,19 @@ jobs:
               return handle;
           }
 
+          inline int64_t QpcTicks() noexcept {
+              LARGE_INTEGER counter{};
+              return QueryPerformanceCounter(&counter) ? counter.QuadPart : -1;
+          }
+
           inline void Log(const char *stage, int n, int detail,
                           int64_t waitUs, int64_t workUs) noexcept {
               char line[256];
               const auto tNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
                   Clock::now().time_since_epoch()).count();
               const int length = std::snprintf(line, sizeof(line),
-                  "t_ns=%lld stage=%s frame=%d detail=%d wait_us=%lld work_us=%lld\r\n",
-                  static_cast<long long>(tNs), stage, n, detail,
+                  "t_ns=%lld qpc_ticks=%lld stage=%s frame=%d detail=%d wait_us=%lld work_us=%lld\r\n",
+                  static_cast<long long>(tNs), static_cast<long long>(QpcTicks()), stage, n, detail,
                   static_cast<long long>(waitUs), static_cast<long long>(workUs));
               HANDLE handle = LogHandle();
               if (handle == INVALID_HANDLE_VALUE || length <= 0)
@@ -128,8 +133,8 @@ jobs:
               const auto tNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
                   Clock::now().time_since_epoch()).count();
               const int length = std::snprintf(line, sizeof(line),
-                  "t_ns=%lld stage=FlowFPSPhase frame=%d detail=%d wait_us=-1 work_us=%lld phase=%s\r\n",
-                  static_cast<long long>(tNs), n, detail,
+                  "t_ns=%lld qpc_ticks=%lld stage=FlowFPSPhase frame=%d detail=%d wait_us=-1 work_us=%lld phase=%s\r\n",
+                  static_cast<long long>(tNs), static_cast<long long>(QpcTicks()), n, detail,
                   static_cast<long long>(workUs), phase);
               HANDLE handle = LogHandle();
               if (handle == INVALID_HANDLE_VALUE || length <= 0)
@@ -464,7 +469,7 @@ jobs:
           p.write_text(s, encoding="utf-8")
           print("Added FlowFPS internal phase timers for vectors, frame setup, masks, and luma/chroma loops.")
 
-          print("Diagnostic windows: Analyse/Super frames 1430-1530; FlowFPS frames 2180-2280.")
+          print("Diagnostic windows: Analyse/Super frames 1350-1550; FlowFPS frames 2100-2300.")
           PY
 
       - name: Apply and commit Zen 3 tuning to AVX2 build variant only
@@ -566,8 +571,9 @@ jobs:
           4. Close PotPlayer and find D:\\MVtools\\MVUtensils_FrameTimingDiag_<PID>.txt, then share that log.
 
           Recorded frame windows:
-          - Analyse and Super: frames 1430 through 1530.
-          - FlowFPS: frames 2180 through 2280.
+          - Analyse and Super: frames 1350 through 1550.
+          - FlowFPS: frames 2100 through 2300.
+          - qpc_ticks: QueryPerformanceCounter clock shared with the companion Filter diagnostic (stage end).
 
           Log fields:
           - wait_us: elapsed wall time from VapourSynth's arInitial request until arAllFramesReady, including waiting for dependent clips/frames.
