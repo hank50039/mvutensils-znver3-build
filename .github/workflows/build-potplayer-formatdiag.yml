@@ -1,8 +1,8 @@
-name: Build EOS terminal frame duration bugfix - dual BT709 + CAP28
+name: Build clean EOF-fixed Release x64 - dual BT709 + CAP28 - no logs
 
 on:
   push:
-    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021, release/bt709-dual-fastpath-cap28-no-logs-20261021, experiment/eof-cap28-drain-20261021, experiment/eof-drain-eos-complete-20261021, experiment/eof-source-bound-shorttail-20261021, experiment/eof-stall-watchdiag-20261021, experiment/eof-dependency-trace-20261021, experiment/eof-duration-deadlock-fix-dlogs-20261021]
+    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021, release/bt709-dual-fastpath-cap28-no-logs-20261021, experiment/eof-cap28-drain-20261021, experiment/eof-drain-eos-complete-20261021, experiment/eof-source-bound-shorttail-20261021, experiment/eof-stall-watchdiag-20261021, experiment/eof-dependency-trace-20261021, experiment/eof-duration-deadlock-fix-dlogs-20261021, release/eof-durationfix-dualfastpath-cap28-nolog-20261022]
   workflow_dispatch:
 
 permissions:
@@ -33,7 +33,7 @@ jobs:
           python .github/scripts/patch_vsfilter_diag.py avisynth_filter *> apply-patch.log
           $patchExitCode = $LASTEXITCODE
           Get-Content apply-patch.log | Write-Output
-          if ($patchExitCode -ne 0) { throw "Diagnostic patch failed with exit code $patchExitCode." }
+          if ($patchExitCode -ne 0) { throw "Release patch failed with exit code $patchExitCode." }
 
       - name: Authenticate GitHub dependency metadata queries
         shell: pwsh
@@ -81,11 +81,11 @@ jobs:
           if ($frame -notmatch 'EOS_WAIT_TIMEOUT' -or $frame -notmatch 'CALLBACK_LOST_FAILED_FRAME' -or $frame -notmatch 'OUTPUT_PTS' -or $frame -notmatch 'SOURCE_LOOKAHEAD' -or $frame -notmatch 'OUTPUT_DELIVER_DONE' -or $frame -notmatch 'EofWatch' -or $frame -notmatch 'SOURCE_WAIT_TIMEOUT' -or $frame -notmatch 'SOURCE_RESULT' -or $frame -notmatch 'FLUSH_SIGNAL') {
             throw "Narrow EOF watchdog markers missing."
           }
-          if ($frame -notmatch 'durationNumElementsBefore <= 0' -or $frame -notmatch 'durationDenElementsBefore <= 0' -or $frame -notmatch 'EOF_DURATION_AFTER') {
+          if ($frame -notmatch 'durationNumElementsBefore <= 0' -or $frame -notmatch 'durationDenElementsBefore <= 0') {
             throw "Terminal duration -1 missing-key bugfix absent."
           }
-          if ($frame -notmatch 'CreateDirectoryW\(L"D:\\\\SynthFilters"' -or $frame -notmatch 'VapourSynth_EOFWatch_%lu.txt') {
-            throw "Requested D:\\SynthFilters output folder not present."
+          if ($frame -notmatch 'inline auto EofWatch\(bool, const wchar_t\*, \.\.\.\) noexcept -> void \{\}' -or $frame -match 'CreateDirectoryW|_wfopen_s|fwprintf_s|vfwprintf_s|QueryPerformanceCounter|g_eofWatchFile|g_eofWatchEnabled|VapourSynth_EOFWatch_') {
+            throw "Diagnostic EOFWatch sink remains or no-op verification failed."
           }
           if ($frame -match 'while \(_nextOutputFrameNb <= maxRequestOutputFrameNb\)') {
             throw "Old input-only CAP28 request loop should be replaced by the refill pump."
@@ -120,26 +120,22 @@ jobs:
             "Fix: wake blocked lookahead GetSourceFrame calls at EOF and supply last real source frame"
             "Fix: initialize main script at upstream EOF when fewer than InitialSrcBuffer frames remain following a seek"
             "Fix: include final source presentation interval in bounded output watermark"
-            "DIAGNOSTIC ONLY: records EOS queue state, failed callbacks, missing previous frames and last output PTS in %TEMP%"
-            "No regular Filter log output and no MVUtensils FrameTimingDiag log"
-            "Never use as a production release; diagnostic capture at end-of-stream only"
-            "Record SOURCE_WAIT_TIMEOUT, SOURCE_RESULT, FLUSH_BEGIN, FLUSH_SIGNAL to distinguish blocked frame dependency versus stop-triggered completion"
-            "EOFWatch log now contains real text line breaks rather than literal escaped slash-n"
-            "Confirmed bug: VSAPI mapNumElements(-1) for missing duration, not 0; corrected terminal frame check to <= 0"
-            "EOFWatch now writes to D:\\SynthFilters\\VapourSynth_EOFWatch_<PID>.txt; folder auto-created"
+              "No regular Filter log output and no MVUtensils FrameTimingDiag log"
+                  "Confirmed bug: VSAPI mapNumElements(-1) for missing duration, not 0; corrected terminal frame check to <= 0"
+            "Clean release: EOFWatch logging sink and file creation removed; no runtime diagnostic output"
             "Removed: request/callback QPC diagnostics, additional maps, diagnostic log calls, per-frame telemetry"
             "Disabled: original Environment logfile creation even when configured in INI"
             "Untouched: VapourSynth interpolation script; input/output pixel-format conversion; colorspace updates"
             "Scope: exact VIDEOINFOHEADER2 dwControlFlags 0 to 0x2880A581, other media type changes use upstream behavior"
             "Companion: use non-diagnostic MVUtensils AVX2 DLL to disable its separate FrameTimingDiag log"
-            "Note: this is a clean build; runtime playback stability must still be checked on the user's machine"
+            "Based on successfully runtime-tested EOF duration bugfix, with diagnostic sink disabled"
           ) | Set-Content dist/BUILD-INFO.txt
           Get-FileHash (Join-Path dist $dll.Name) -Algorithm SHA256 | Format-List | Out-String | Set-Content dist/SHA256.txt
 
       - name: Upload compiled filter
         uses: actions/upload-artifact@v4
         with:
-          name: potplayer-vsfilter-eof-durationfix-d-synthfilters-x64
+          name: potplayer-vsfilter-eof-durationfix-dualfastpath-cap28-nolog-release-x64
           path: dist/*
           if-no-files-found: error
           retention-days: 30
