@@ -2,7 +2,7 @@ name: Build verified Zen 3 AVX2 tuning
 
 on:
   push:
-    branches: [main]
+    branches: [main, release/bt709-dual-fastpath-cap28-no-logs-20261021]
   workflow_dispatch:
 
 permissions:
@@ -119,10 +119,36 @@ jobs:
           strip $(find unpacked -name '*.dll')
           wheel pack unpacked/*
 
+      - name: Package clean AVX2 DLL for release
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          root = Path("dist")
+          dlls = list((root / "unpacked").rglob("mvutensils.avx2.dll"))
+          if len(dlls) != 1:
+              raise SystemExit(f"Expected one AVX2 DLL in wheel, found {len(dlls)}")
+          payload = dlls[0].read_bytes()
+          if not payload.startswith(b"MZ") or b"FrameTimingDiag" in payload:
+              raise SystemExit("Not a clean, non-instrumented Windows AVX2 DLL")
+          out = root / "MVUtensils-Zen3-AVX2-Clean-NoLogs.zip"
+          with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as z:
+              z.write(dlls[0], "mvutensils.avx2.dll")
+              z.writestr("README.txt", (
+                  "Clean MVUtensils AVX2 Release for Ryzen Zen 3.\n"
+                  "Built from pristine upstream source with -march=x86-64-v3 -mtune=znver3.\n"
+                  "No diagnostic timing instrumentations or log files.\n"
+                  "Back up existing DLL and replace mvutensils.avx2.dll only.\n"
+                  "Combine with the matched clean dual-fastpath CAP28 VapourSynth Filter.\n"
+              ))
+          print(f"Clean release DLL: {len(payload)} bytes; package {out.stat().st_size} bytes")
+          PY
+
       - name: Upload verified Windows build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: mvutensils-znver3-windows-verified
+          name: mvutensils-znver3-clean-no-logs-release-x64
           path: dist/*
           if-no-files-found: error
           retention-days: 14
