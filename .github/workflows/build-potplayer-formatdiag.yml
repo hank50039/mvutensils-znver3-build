@@ -2,7 +2,7 @@ name: Build PotPlayer VapourSynth diagnostics with original queue behavior
 
 on:
   push:
-    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021]
+    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021]
   workflow_dispatch:
 
 permissions:
@@ -53,6 +53,7 @@ jobs:
           if ($src -notmatch 'DYNAMIC_MT_FASTPATH applied' -or $src -notmatch '_isInputMediaTypeChanged = !traceMetadataOnlyCandidate') {
             throw "The tested BT.709 metadata-only Fast Path must be preserved."
           }
+          if ($frame -notmatch 'submit_qpc' -or $frame -notmatch 'callback_qpc' -or $frame -notmatch 'wait_end_qpc') { throw 'Common QPC correlation markers are missing.' }
           if ($frame -notmatch 'STARTPOINTDIAG AddInputSample_wait' -or $frame -notmatch 'STARTPOINTDIAG OutputFrame_ready' -or $frame -notmatch 'STARTPOINTDIAG OutputFrame_submit' -or $frame -notmatch 'STARTPOINTDIAG OutputFrame_callback_lock') {
             throw "Sparse start-position wait, output-frame callback latency, async-submit time, and callback-lock timing diagnostics are missing."
           }
