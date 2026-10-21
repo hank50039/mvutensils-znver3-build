@@ -119,34 +119,96 @@ frame_cpp.write_text(s, encoding="utf-8", newline="")
 
 replace_once(
     frame_cpp,
-    '''    while (_nextOutputFrameNb <= maxRequestOutputFrameNb) {
-        // before every async request to a frame, we need to keep track of the request so that when flushing we can wait for
-        // any pending request to finish before destroying the script
-
-        {
-            const std::unique_lock uniqueOutputLock(_outputMutex);
-
-            _outputFrames.emplace(_nextOutputFrameNb, nullptr);
-        }
-        AVSF_VPS_API->getFrameAsync(_nextOutputFrameNb, MainFrameServer::GetInstance().GetScriptClip(), VpsGetFrameCallback, this);
-
-        _nextOutputFrameNb += 1;
-    }''',
+    '''    {
+        // Register newly available output frames, even when CAP28 is full.
+        const std::unique_lock uniqueOutputLock(_outputMutex);
+        _maxRequestOutputFrameNb = std::max(_maxRequestOutputFrameNb, maxRequestOutputFrameNb);
+    }
+    RequestPendingOutputFrames();''',
     '''    while (_nextOutputFrameNb <= maxRequestOutputFrameNb) {
         // Limit simultaneously outstanding output frames to the validated CAP28.
         // Preserve async request and frame delivery ordering.
+        // Save the highest frame number now eligible to be requested.
+        // The worker replenishes the bounded queue as completed frames leave.
         {
             const std::unique_lock uniqueOutputLock(_outputMutex);
-            if (_outputFrames.size() >= MAX_PENDING_OUTPUT_FRAMES) {
-                break;
-            }
-            _outputFrames.emplace(_nextOutputFrameNb, nullptr);
+            _maxRequestOutputFrameNb = std::max(_maxRequestOutputFrameNb, maxRequestOutputFrameNb);
         }
-        AVSF_VPS_API->getFrameAsync(_nextOutputFrameNb, MainFrameServer::GetInstance().GetScriptClip(), VpsGetFrameCallback, this);
-
-        _nextOutputFrameNb += 1;
+        RequestPendingOutputFrames();
+        break;
     }''',
     "CAP28 outstanding-output request bound"
+)
+
+
+# CAP28 drain fix: without an input sample after decoder EOS, a queue that
+# became full would never submit remaining output requests. Pump after each
+# output is delivered, using the same pending map limit and original ordering.
+replace_once(
+    root / "vapoursynth_filter/src/frame_handler.h",
+    '''    auto WorkerProc() -> void;
+    auto GarbageCollect(int srcFrameNb) -> void;''',
+    '''    auto WorkerProc() -> void;
+    auto RequestPendingOutputFrames() -> void;
+    auto GarbageCollect(int srcFrameNb) -> void;''',
+    "Declaration for output request replenishment"
+)
+replace_once(
+    root / "vapoursynth_filter/src/frame_handler.h",
+    '''    int _nextOutputFrameNb;
+    REFERENCE_TIME _nextOutputFrameStartTime;''',
+    '''    int _nextOutputFrameNb;
+    int _maxRequestOutputFrameNb = -1;
+    REFERENCE_TIME _nextOutputFrameStartTime;''',
+    "Saved highest eligible output frame"
+)
+replace_once(
+    frame_cpp,
+    '''auto FrameHandler::GetSourceFrame(int frameNb) -> const VSFrame * {''',
+    '''auto FrameHandler::RequestPendingOutputFrames() -> void {
+    // Both producer and worker can trigger this method. Reserve each request
+    // under the output mutex, then call the VS API WITHOUT holding it:
+    // callbacks need to acquire the same mutex to store completed frames.
+    while (!_isFlushing && !_isStopping) {
+        int n;
+        {
+            const std::unique_lock uniqueOutputLock(_outputMutex);
+            if (_isFlushing || _isStopping ||
+                _outputFrames.size() >= MAX_PENDING_OUTPUT_FRAMES ||
+                _nextOutputFrameNb > _maxRequestOutputFrameNb) {
+                return;
+            }
+            n = _nextOutputFrameNb++;
+            _outputFrames.emplace(n, nullptr);
+        }
+        AVSF_VPS_API->getFrameAsync(n, MainFrameServer::GetInstance().GetScriptClip(),
+                                  VpsGetFrameCallback, this);
+    }
+}
+
+auto FrameHandler::GetSourceFrame(int frameNb) -> const VSFrame * {''',
+    "CAP28 refill worker method"
+)
+replace_once(
+    frame_cpp,
+    '''    _nextOutputFrameNb = 0;
+    _lastUsedSourceFrameNb = 0;''',
+    '''    _nextOutputFrameNb = 0;
+    _maxRequestOutputFrameNb = -1;
+    _lastUsedSourceFrameNb = 0;''',
+    "Reinitialize queued request watermark on seeking/flush"
+)
+replace_once(
+    frame_cpp,
+    '''        GarbageCollect(sourceFrameNb - 1);
+        _nextDeliveryFrameNb += 1;''',
+    '''        GarbageCollect(sourceFrameNb - 1);
+        _nextDeliveryFrameNb += 1;
+
+        // Critical at end-of-stream: continue issuing eligible output requests
+        // even after the decoder has stopped delivering new input samples.
+        RequestPendingOutputFrames();''',
+    "Refill CAP28 from output delivery thread after each completed frame"
 )
 
 # Disable the built-in logfile as well, even if a stale LogFile= entry
@@ -174,10 +236,12 @@ assert modified["filter"].count("IsOnlyVideoInfo2ControlFlagsChanged(") == 3
 assert "_isInputMediaTypeChanged = !metadataOnlyBt709" in modified["filter"]
 assert "MAX_PENDING_OUTPUT_FRAMES = 28" in modified["frame"]
 assert modified["frame"].count("getFrameAsync(") == 1
+assert "RequestPendingOutputFrames();" in modified["frame"]
+assert "_maxRequestOutputFrameNb" in modified["frame"]
 assert "_outputRequestTimes" not in modified["frame"]
 assert "_wfsopen" not in modified["environment"]
 for tag in ("STARTPOINTDIAG", "RECVTRACE", "FORMAT_DIFF", "DYNAMIC_MT_FASTPATH", "DYNAMIC_MT_PRECHECK_FASTPATH", "CAP28DIAG"):
     if any(tag in x for x in modified.values()):
         raise SystemExit("Unexpected diagnostic marker remains: " + tag)
 
-print("Release patch complete: Receive Fast Path + Precheck Fast Path + CAP28; zero diagnostic instrumentation; native logfile disabled.")
+print("Release patch complete: dual BT709 Fast Paths + CAP28 auto-refill after output delivery; no runtime logs.")
