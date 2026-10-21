@@ -1,8 +1,8 @@
-name: Build EOF-only stall watch diagnostic - dual BT709 Fast Paths + CAP28
+name: Build EOF source dependency trace & flush ordering - dual BT709 + CAP28
 
 on:
   push:
-    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021, release/bt709-dual-fastpath-cap28-no-logs-20261021, experiment/eof-cap28-drain-20261021, experiment/eof-drain-eos-complete-20261021, experiment/eof-source-bound-shorttail-20261021, experiment/eof-stall-watchdiag-20261021]
+    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021, release/bt709-dual-fastpath-cap28-no-logs-20261021, experiment/eof-cap28-drain-20261021, experiment/eof-drain-eos-complete-20261021, experiment/eof-source-bound-shorttail-20261021, experiment/eof-stall-watchdiag-20261021, experiment/eof-dependency-trace-20261021]
   workflow_dispatch:
 
 permissions:
@@ -78,7 +78,7 @@ jobs:
           if ($frame -notmatch 'std::memory_order_acquire' -or $frame -notmatch 'std::memory_order_release' -or $frame -notmatch 'SourceAvgFrameDuration\(\)' -or $frame -notmatch '_nextSourceFrameNb < Environment::GetInstance\(\).GetInitialSrcBuffer\(\)') {
             throw "EOS source lookahead resolution / short-tail script startup / last frame request bound are missing."
           }
-          if ($frame -notmatch 'EOS_WAIT_TIMEOUT' -or $frame -notmatch 'CALLBACK_LOST_FAILED_FRAME' -or $frame -notmatch 'OUTPUT_PTS' -or $frame -notmatch 'SOURCE_LOOKAHEAD' -or $frame -notmatch 'OUTPUT_DELIVER_DONE' -or $frame -notmatch 'EofWatch') {
+          if ($frame -notmatch 'EOS_WAIT_TIMEOUT' -or $frame -notmatch 'CALLBACK_LOST_FAILED_FRAME' -or $frame -notmatch 'OUTPUT_PTS' -or $frame -notmatch 'SOURCE_LOOKAHEAD' -or $frame -notmatch 'OUTPUT_DELIVER_DONE' -or $frame -notmatch 'EofWatch' -or $frame -notmatch 'SOURCE_WAIT_TIMEOUT' -or $frame -notmatch 'SOURCE_RESULT' -or $frame -notmatch 'FLUSH_SIGNAL') {
             throw "Narrow EOF watchdog markers missing."
           }
           if ($frame -match 'while \(_nextOutputFrameNb <= maxRequestOutputFrameNb\)') {
@@ -117,6 +117,8 @@ jobs:
             "DIAGNOSTIC ONLY: records EOS queue state, failed callbacks, missing previous frames and last output PTS in %TEMP%"
             "No regular Filter log output and no MVUtensils FrameTimingDiag log"
             "Never use as a production release; diagnostic capture at end-of-stream only"
+            "Record SOURCE_WAIT_TIMEOUT, SOURCE_RESULT, FLUSH_BEGIN, FLUSH_SIGNAL to distinguish blocked frame dependency versus stop-triggered completion"
+            "EOFWatch log now contains real text line breaks rather than literal escaped slash-n"
             "Removed: request/callback QPC diagnostics, additional maps, diagnostic log calls, per-frame telemetry"
             "Disabled: original Environment logfile creation even when configured in INI"
             "Untouched: VapourSynth interpolation script; input/output pixel-format conversion; colorspace updates"
@@ -129,7 +131,7 @@ jobs:
       - name: Upload compiled filter
         uses: actions/upload-artifact@v4
         with:
-          name: potplayer-vsfilter-eof-stall-watchdiag-x64
+          name: potplayer-vsfilter-eof-dependency-flush-watchdiag-x64
           path: dist/*
           if-no-files-found: error
           retention-days: 30
