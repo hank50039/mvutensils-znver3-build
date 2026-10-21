@@ -236,9 +236,15 @@ auto CSynthFilter::BeginFlush() -> HRESULT {''',
 }
 
 auto CSynthFilter::EndOfStream() -> HRESULT {
-    // Decoder EOS is NOT output EOS: finish all queued output frames first.
+#ifdef AVSF_VAPOURSYNTH
+    // VapourSynth produces asynchronously on a separate delivery worker.
+    // Do not forward decoder EOS until the pending output frames are sent.
     frameHandler->SignalInputEndOfStream();
     return S_OK;
+#else
+    // Leave the AviSynth variant's existing EOS behavior unchanged.
+    return __super::EndOfStream();
+#endif
 }
 
 auto CSynthFilter::BeginFlush() -> HRESULT {''',
