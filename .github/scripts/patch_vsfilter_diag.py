@@ -331,8 +331,9 @@ wait_end_replacement = '''    });
             L"STARTPOINTDIAG AddInputSample_wait wait_us %lld input_time_hr 0x%08lX input_start %lld input_stop %lld next_source %d last_used_source %d extra_src_buffer %d input_mt_changed %d need_reload %d flushing %d stopping %d",
             addInputSampleWaitUs, static_cast<unsigned long>(diagInputTimeHr),
             static_cast<long long>(diagInputStart), static_cast<long long>(diagInputStop),
-            _nextSourceFrameNb, _lastUsedSourceFrameNb, _extraSrcBuffer,
-            _filter._isInputMediaTypeChanged, _filter._needReloadScript, _isFlushing, _isStopping);
+            _nextSourceFrameNb, static_cast<int>(_lastUsedSourceFrameNb.load()), _extraSrcBuffer,
+            _filter._isInputMediaTypeChanged, _filter._needReloadScript,
+            static_cast<bool>(_isFlushing.load()), static_cast<bool>(_isStopping.load()));
     }
 
     if (_isFlushing || _isStopping) {'''
