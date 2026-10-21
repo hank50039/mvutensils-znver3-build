@@ -1,8 +1,8 @@
-name: Build EOF-safe CAP28 refill + async EOS ordering + dual BT709 Fast Paths
+name: Build EOF source lookahead and short-tail startup + safe CAP28 EOS
 
 on:
   push:
-    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021, release/bt709-dual-fastpath-cap28-no-logs-20261021, experiment/eof-cap28-drain-20261021, experiment/eof-drain-eos-complete-20261021]
+    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021, release/bt709-dual-fastpath-cap28-no-logs-20261021, experiment/eof-cap28-drain-20261021, experiment/eof-drain-eos-complete-20261021, experiment/eof-source-bound-shorttail-20261021]
   workflow_dispatch:
 
 permissions:
@@ -75,6 +75,9 @@ jobs:
           if ($frame -notmatch 'SignalInputEndOfStream\(\)' -or $frame -notmatch 'DeliverEndOfStreamIfDrained\(\)' -or $frame -notmatch '_inputEosSeen' -or $frame -notmatch '_eosForwarded' -or $header -notmatch 'SignalInputEndOfStream\(\)') {
             throw "Asynchronous EOS deferred until queue-drained and final source frame duration fix is missing."
           }
+          if ($frame -notmatch 'std::memory_order_acquire' -or $frame -notmatch 'std::memory_order_release' -or $frame -notmatch 'SourceAvgFrameDuration\(\)' -or $frame -notmatch '_nextSourceFrameNb < Environment::GetInstance\(\).GetInitialSrcBuffer\(\)') {
+            throw "EOS source lookahead resolution / short-tail script startup / last frame request bound are missing."
+          }
           if ($frame -match 'while \(_nextOutputFrameNb <= maxRequestOutputFrameNb\)') {
             throw "Old input-only CAP28 request loop should be replaced by the refill pump."
           }
@@ -105,6 +108,9 @@ jobs:
             "Fix: continue requesting remaining eligible outputs when decoder reaches EOS and no further input samples arrive"
             "Fix: override CTransformFilter default EOS, notify renderer only after all output frames are delivered"
             "Fix: ensure final input source frame duration properties exist for last-frame dependencies"
+            "Fix: wake blocked lookahead GetSourceFrame calls at EOF and supply last real source frame"
+            "Fix: initialize main script at upstream EOF when fewer than InitialSrcBuffer frames remain following a seek"
+            "Fix: include final source presentation interval in bounded output watermark"
             "Removed: request/callback QPC diagnostics, additional maps, diagnostic log calls, per-frame telemetry"
             "Disabled: original Environment logfile creation even when configured in INI"
             "Untouched: VapourSynth interpolation script; input/output pixel-format conversion; colorspace updates"
@@ -117,7 +123,7 @@ jobs:
       - name: Upload compiled filter
         uses: actions/upload-artifact@v4
         with:
-          name: potplayer-vsfilter-eof-safe-dualfastpath-cap28-nolog-x64
+          name: potplayer-vsfilter-eof-lookahead-shorttail-cap28-dualfastpath-x64
           path: dist/*
           if-no-files-found: error
           retention-days: 30
