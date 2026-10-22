@@ -76,7 +76,7 @@ jobs:
           Get-Content $header
           $ffconfig = 'lav/ffmpeg/config.h'
           if (!(Test-Path $ffconfig)) {
-            @('#ifndef FFMPEG_CONFIG_H', '#define FFMPEG_CONFIG_H', '#define ARCH_X86 1', '#define ARCH_X86_64 1', '#define HAVE_BIGENDIAN 0', '#define HAVE_FAST_UNALIGNED 1', '#define HAVE_INLINE_ASM 0', '#define HAVE_X86ASM 0', '#define HAVE_MMX_INLINE 0', '#define CONFIG_SMALL 0', '#endif') | Set-Content $ffconfig -Encoding ascii
+            @('#ifndef FFMPEG_CONFIG_H', '#define FFMPEG_CONFIG_H', '#define ARCH_X86 1', '#define ARCH_X86_64 1', '#define HAVE_BIGENDIAN 0', '#define HAVE_FAST_UNALIGNED 1', '#define HAVE_FAST_64BIT 1', '#define HAVE_INLINE_ASM 0', '#define HAVE_X86ASM 0', '#define HAVE_MMX_INLINE 0', '#define CONFIG_SMALL 0', '#endif') | Set-Content $ffconfig -Encoding ascii
           }
           Get-Content $ffconfig
       - name: MSVC Build Release x64 LAVSplitter.ax with unchanged 0.83 demux and FFmpeg
