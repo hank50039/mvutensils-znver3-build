@@ -77,7 +77,6 @@ jobs:
           assert f.count("ScopedVideoComputeAffinity isolateVideoWork;") == 1
           assert a.count("ScopedVideoComputeAffinity isolateVideoWork;") == 1
           assert "SetThreadAffinityMask" in h and "SetThreadPriority" not in h
-          assert "SetThreadPriority" in h
           print("Confirmed scoped Windows video CPU affinity experiment; no pixel kernels changed.")
           PY
 
