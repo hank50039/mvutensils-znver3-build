@@ -1,0 +1,109 @@
+name: Build MPC Audio Renderer x64 - LIVE-V6 explicit path diagnostic
+on:
+  push:
+    branches: [experiment/mpc-audio-exclusive-pathdiag-v6-20261022]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audio-pathdiag:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - name: Checkout isolated audio recovery patch
+        uses: actions/checkout@v4
+      - name: Fetch pinned MPC-BE source and all submodules
+        shell: pwsh
+        run: |
+          git clone --recursive https://github.com/Aleksoid1978/MPC-BE.git mpc
+          cd mpc
+          git checkout 797d0a2c0e9afe49b20c82a8844ff96c501c8e95
+          git submodule update --init --recursive
+          cd ..
+          if (!(Test-Path mpc/src/filters/renderer/MpcAudioRenderer/MpcAudioRenderer.cpp)) { throw "MPC audio renderer source absent" }
+      - name: Apply prior audio diagnostics plus V6 path and constructor markers
+        shell: pwsh
+        run: |
+          python .github/scripts/patch_mpc_audio_exclusive_recovery.py mpc
+          python .github/scripts/patch_mpc_audio_live_diag.py mpc
+          python .github/scripts/patch_mpc_audio_directlog.py mpc
+          python .github/scripts/patch_mpc_audio_multidir_diag_v6.py mpc
+          if (!(Select-String -LiteralPath mpc/src/filters/renderer/MpcAudioRenderer/MpcAudioRenderer.cpp -Pattern 'LIVE-V6 filter constructor entered' -Quiet)) { throw "Missing V6 constructor marker" }
+          if (!(Select-String -LiteralPath mpc/src/filters/renderer/MpcAudioRenderer/MpcAudioRenderer.cpp -Pattern 'MpcAudioLiveV6_%lu.txt' -Quiet)) { throw "Missing direct live V5 file logger" }
+          if (!(Select-String -LiteralPath mpc/src/filters/renderer/MpcAudioRenderer/MpcAudioRenderer.cpp -Pattern 'MpcAudioDiag: LIVE-V4 beat' -Quiet)) { throw "Missing live render-thread heartbeat" }
+          $files = @(git -C mpc diff --name-only)
+          if ($files.Count -ne 2) { throw "Expected exactly two patched renderer files, got $files" }
+          foreach ($f in $files) {
+            if ($f -notin @('src/filters/renderer/MpcAudioRenderer/MpcAudioRenderer.cpp','src/filters/renderer/MpcAudioRenderer/MpcAudioRenderer.h')) { throw "Unexpected non-audio edit: $f" }
+          }
+      - name: Install matching MPC-BE MSYS/Mingw toolchain
+        shell: pwsh
+        run: |
+          curl.exe -sSL https://github.com/Aleksoid1978/MSYS/raw/main/MSYS_MinGW-w64_GCC_1521_x86-x64.7z -o MSYS.7z
+          if (!(Test-Path MSYS.7z) -or (Get-Item MSYS.7z).Length -lt 1000000) { throw "MSYS archive unavailable" }
+          7z x MSYS.7z -oC:\MSYS -y
+          if ($LASTEXITCODE -ne 0) { throw "MSYS extraction failed" }
+          cd mpc
+          @'
+          @ECHO OFF
+          SET "MPCBE_MSYS=C:\MSYS"
+          SET "MPCBE_MINGW=C:\MSYS\mingw"
+          '@ | Set-Content environments.bat -Encoding ascii
+          .\update_gcc.bat
+          if ($LASTEXITCODE -ne 0) { throw "Updating MPC-BE GCC dependencies failed" }
+      - name: Build x64 standalone renderer and prerequisite filter libraries
+        shell: cmd
+        run: |
+          cd mpc
+          call build.bat Build x64 Filters Release NoWait
+          if errorlevel 1 exit /b 1
+      - name: Verify release renderer and package safe side-by-side experiment
+        shell: pwsh
+        run: |
+          $matches = @(Get-ChildItem mpc/_bin -Recurse -File -Include MpcAudioRenderer.ax,MpcAudioRenderer.dll)
+          if ($matches.Count -eq 0) { throw "No MPC Audio Renderer x64 artifact" }
+          $selected = @($matches | Where-Object { $_.FullName -match 'Filters_x64' } | Sort-Object FullName)
+          if ($selected.Count -eq 0) { throw "No Filters_x64 audio renderer" }
+          $file = $selected[0]
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item $file.FullName dist/MpcAudioRenderer.ax
+          $data = [IO.File]::ReadAllBytes((Resolve-Path dist/MpcAudioRenderer.ax))
+          if ($data[0] -ne 77 -or $data[1] -ne 90) { throw "Not a PE file" }
+          @'
+          EXPERIMENTAL MPC Audio Renderer x64 - LIVE-V6 constructor plus render-thread diagnostics
+          Source MPC-BE pinned 797d0a2c0e9afe49b20c82a8844ff96c501c8e95
+          Changes only in src/filters/renderer/MpcAudioRenderer/MpcAudioRenderer.cpp/.h.
+          Writes a low-rate per-PID log first to Public Documents, falling back
+          to LOCALAPPDATA\\Temp or the process GetTempPathW, named
+          MpcAudioLiveV5_<PotPlayerPID>.txt. NO DEBUGVIEW REQUIRED.
+          Independent diagnostic once ~1.5 s from audio render thread, listing current
+          queue size, last audio Transform age, last output payload age, and
+          recovery request flags. Diagnostic string: MpcAudioDiag: LIVE-V4
+          The filter remains in exclusive mode during the test.
+          For exclusive PCM mode only, four consecutive WASAPI buffer errors or
+          prolonged 350 ms genuinely empty audio queue trigger deferred audio-only
+          device reinitialization, rate-limited to once per 5 seconds.
+          Existing RenderAudio device reinit path preserves video filter graph
+          and does not modify MVUtensils or limit CPU resources.
+          ATTENTION: Audio interruptions on automatic restart are possible.
+          If an intermittent underrun never raises a buffer error or queue-empty
+          condition, this experiment may not repair the problem.
+          Keep original Zen3 MVUtensils DLL without CPU affinity restriction.
+          Keep PotPlayer, CAP28, 4K90 and core.num_threads=32 unchanged.
+          Use standalone MPC Audio Renderer as PotPlayer audio renderer and back
+          up its original registered AX before replacing it. Never overwrite
+          PotPlayer/K-Lite LAV Splitter files with this artifact.
+          On failure restore original MPC Audio Renderer AX. 
+          '@ | Set-Content dist/README-TEST.txt -Encoding utf8
+          Get-FileHash dist/MpcAudioRenderer.ax -Algorithm SHA256 | Format-List | Out-File dist/SHA256.txt
+          Compress-Archive -Path dist/* -DestinationPath MPC-Audio-LiveV6-PathDiag-x64.zip -Force
+          Write-Host "MpcAudioRenderer: $($file.FullName); $($file.Length) bytes"
+      - name: Upload verified audio-only experimental renderer
+        uses: actions/upload-artifact@v4
+        with:
+          name: MPC-Audio-Exclusive-LIVE-V6-PathDiag-x64-Experiment
+          path: MPC-Audio-LiveV6-PathDiag-x64.zip
+          retention-days: 30
+          if-no-files-found: error
