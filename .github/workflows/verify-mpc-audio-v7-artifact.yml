@@ -1,0 +1,65 @@
+name: Validate shipping V7 push renderer binary and COM startup
+on:
+  push:
+    branches: [experiment/mpc-audio-v7-artifact-validation-20261023]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  verify:
+    runs-on: windows-2022
+    timeout-minutes: 8
+    steps:
+      - name: Fetch exact LIVE-V7 artifact, not a rebuild
+        uses: actions/download-artifact@v4
+        with:
+          run-id: 39828182144
+          github-token: ${{ github.token }}
+          artifact-ids: 12447927630
+          path: artifact
+      - name: Inspect compiled binary and instantiate COM class
+        shell: pwsh
+        run: |
+          $outer = @(Get-ChildItem artifact -Recurse -File -Filter '*.zip')
+          if ($outer.Count -ne 1) { throw "Expected one inner ZIP; got $($outer.Count)" }
+          New-Item -ItemType Directory -Force -Path expanded | Out-Null
+          Expand-Archive -LiteralPath $outer[0].FullName -DestinationPath expanded -Force
+          $ax = @(Get-ChildItem expanded -Recurse -File -Filter 'MpcAudioRenderer.ax')
+          if ($ax.Count -ne 1) { throw "Expected one AX" }
+          $path = $ax[0].FullName
+          $bin = [IO.File]::ReadAllBytes($path)
+          $ascii = [Text.Encoding]::ASCII.GetString($bin)
+          $utf16 = [Text.Encoding]::Unicode.GetString($bin)
+          if (!$ascii.Contains('LIVE-V6 filter constructor entered')) { throw 'EXPERIMENT FAILED: constructor marker missing from actual compiled AX' }
+          if (!$utf16.Contains('MpcAudioLiveV6_%lu.txt')) { throw 'EXPERIMENT FAILED: log-path template missing from compiled AX' }
+          if (!$utf16.Contains('LIVE-V7 PUSH calls=')) { throw 'EXPERIMENT FAILED: V7 PUSH diag absent from compiled AX' }
+          Write-Host "REAL V7 AX SHA256 = $((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash)"
+          Write-Host "VERIFIED: compiled AX contains real LIVE-V7 diagnostic markers. Byte length=$($bin.Length)"
+          $clsid = [guid]'601D2A2B-9CDE-40bd-8650-0485E3522727'
+          try {
+            $r = Start-Process -FilePath "$env:WINDIR\System32\regsvr32.exe" -ArgumentList @('/s', ('"' + $path + '"')) -Wait -PassThru
+            if ($r.ExitCode -ne 0) { throw "Regsvr32 returned $($r.ExitCode)" }
+            Write-Host 'Registered AX test instance on ephemeral CI Windows host.'
+            $type = [type]::GetTypeFromCLSID($clsid)
+            if (!$type) { throw 'GetTypeFromCLSID failed' }
+            $object = [Activator]::CreateInstance($type)
+            if (!$object) { throw 'COM instance creation returned null' }
+            Write-Host 'CoCreateInstance succeeded.'
+            $target = @(
+              (Join-Path $env:PUBLIC ('Documents\MpcAudioLiveV6_'+$PID+'.txt')),
+              (Join-Path $env:LOCALAPPDATA ('Temp\MpcAudioLiveV6_'+$PID+'.txt')),
+              (Join-Path $env:TEMP ('MpcAudioLiveV6_'+$PID+'.txt'))
+            )
+            $existing = @($target | Where-Object { Test-Path -LiteralPath $_ })
+            if (!$existing.Count) { throw "EXPERIMENT FAILED: registered COM object but no V6 constructor marker at any predicted path: $($target -join '; ')" }
+            foreach ($f in $existing) {
+              Write-Host "DIAGNOSTIC FOUND: $f"
+              $contents = Get-Content -LiteralPath $f -Raw
+              Write-Host "Contents=$contents"
+              if (!$contents.Contains('LIVE-V6 filter constructor entered')) { throw 'Constructor marker file missing expected content' }
+            }
+            Write-Host 'PASS: compiled release AX can create constructor diagnostic log on a clean Windows host.'
+          } finally {
+            Start-Process -FilePath "$env:WINDIR\System32\regsvr32.exe" -ArgumentList @('/s','/u', ('"' + $path + '"')) -Wait -PassThru | Out-Null
+          }
