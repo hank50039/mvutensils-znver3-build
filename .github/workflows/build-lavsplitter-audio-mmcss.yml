@@ -19,9 +19,10 @@ jobs:
           git clone --branch 0.83 --depth 1 https://github.com/Nevcairiel/LAVFilters.git lav
           cd lav
           git rev-parse HEAD
-          git submodule update --init --depth 1 ffmpeg libbluray
+          git submodule update --init --recursive --depth 1 ffmpeg libbluray
           if (!(Test-Path "ffmpeg/libavformat/avformat.h")) { throw "FFmpeg headers missing" }
           if (!(Test-Path "libbluray/libbluray.vcxproj")) { throw "libbluray VC project missing" }
+          if (!(Test-Path "libbluray/contrib/libudfread/src/udfread.c")) { throw "libudfread nested source missing" }
           cd ..
       - name: Patch ONLY the LAV audio delivery thread with MMCSS
         shell: pwsh
@@ -65,6 +66,21 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Failed import library $part" }
             Write-Host "$part import lib generated with $($symbols.Count) exports"
           }
+      - name: Supply FFmpeg generated configuration header for exact 0.83 source
+        shell: pwsh
+        run: |
+          $header = 'lav/ffmpeg/libavutil/avconfig.h'
+          if (!(Test-Path $header)) {
+            @"
+#ifndef AVUTIL_AVCONFIG_H
+#define AVUTIL_AVCONFIG_H
+#define AV_HAVE_BIGENDIAN 0
+#define AV_HAVE_FAST_UNALIGNED 1
+#define AV_HAVE_INCOMPATIBLE_LIBAV_ABI 0
+#endif
+"@ | Set-Content $header -Encoding ascii
+          }
+          Get-Content $header
       - name: MSVC Build Release x64 LAVSplitter.ax with unchanged 0.83 demux and FFmpeg
         shell: pwsh
         run: |
