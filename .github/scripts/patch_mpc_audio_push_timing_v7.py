@@ -18,9 +18,7 @@ def patch(old,new,label):
     if n!=1: raise SystemExit(f"{label}: expected one anchor, found {n}")
     s=s.replace(old,new,1)
 
-patch('''    ULONGLONG lastDiagTickMs = 0;
-
-\tbool bExit = false;''',
+patch('''    ULONGLONG lastDiagTickMs = 0;''',
 '''    ULONGLONG lastDiagTickMs = 0;
 
     LARGE_INTEGER v7Freq = {};
@@ -35,9 +33,7 @@ patch('''    ULONGLONG lastDiagTickMs = 0;
         return static_cast<ULONGLONG>(
             (static_cast<long double>(stop-start) * 1000000.0L)
             / static_cast<long double>(v7Freq.QuadPart));
-    };
-
-\tbool bExit = false;''', "QPC interval counter declarations")
+    };''', "QPC interval counter declarations")
 
 patch('''            OutputDebugStringW(line);
             if (liveV6Log != INVALID_HANDLE_VALUE) {''',
