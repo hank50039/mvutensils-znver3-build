@@ -90,7 +90,7 @@ replacement='''    // LIVE-V6: shared logger search locations. One open per audi
 # Emit actual carriage returns via C++ literal escape sequences, not doubled backslash.
 replacement=replacement.replace('\\\\r\\\\n',r'\r\n').replace('\\\\n',r'\n')
 s=s[:start]+replacement+s[end:]
-if s.count("liveV5Log")!=2: raise SystemExit("Expected exactly 2 V5 writer/close handles")
+if s.count("liveV5Log")!=5: raise SystemExit("Expected 5 V5 heartbeat/exit handle usages")
 s=s.replace("liveV5Log", "liveV6Log")
 s=s.replace("LIVE-V5 RenderThread exit", "LIVE-V6 RenderThread exit")
 s=s.replace("MpcAudioDiag: LIVE-V5 direct log started", "MpcAudioDiag: LIVE-V6 direct log started")
