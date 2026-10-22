@@ -1,0 +1,110 @@
+name: Build LAV Splitter 0.83 x64 - audio MMCSS without video penalty
+on:
+  push:
+    branches: [experiment/lavsplitter-audio-mmcss-20261022]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lavsplitter:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        name: Checkout isolated patch
+      - name: Fetch exact LAV Filters 0.83 and dependencies
+        shell: pwsh
+        run: |
+          git clone --branch 0.83 --depth 1 https://github.com/Nevcairiel/LAVFilters.git lav
+          cd lav
+          git rev-parse HEAD
+          git submodule update --init --depth 1 ffmpeg libbluray
+          if (!(Test-Path "ffmpeg/libavformat/avformat.h")) { throw "FFmpeg headers missing" }
+          if (!(Test-Path "libbluray/libbluray.vcxproj")) { throw "libbluray VC project missing" }
+          cd ..
+      - name: Patch ONLY the LAV audio delivery thread with MMCSS
+        shell: pwsh
+        run: |
+          python .github/scripts/patch_lav_audio_mmcss.py lav
+          $f = Get-Content lav/demuxer/LAVSplitter/OutputPin.cpp -Raw
+          if (!$f.Contains('ScopedAudioMMCSS audioMMCSS(IsAudioPin());')) { throw "Missing audio-only patch" }
+          if (!$f.Contains('AvRevertMmThreadCharacteristics')) { throw "Missing MMCSS revert" }
+          $diff = git -C lav diff --name-only
+          if (@($diff).Count -ne 1 -or $diff.Trim() -ne "demuxer/LAVSplitter/OutputPin.cpp") { throw "Unintended changes: $diff" }
+      - name: Download official matching 0.83 x64 runtime DLLs
+        shell: pwsh
+        run: |
+          $url = "https://github.com/Nevcairiel/LAVFilters/releases/download/0.83/LAVFilters-0.83-x64.zip"
+          Invoke-WebRequest -Uri $url -OutFile lav083-x64.zip
+          Expand-Archive -Path lav083-x64.zip -DestinationPath lav083-x64 -Force
+          Get-ChildItem lav083-x64 -Recurse -Filter "*.dll" | Select-Object -ExpandProperty FullName
+          foreach ($part in @("avformat", "avcodec", "avutil")) {
+            $match = @(Get-ChildItem lav083-x64 -Recurse -Filter "*$part*-lav*.dll" -File)
+            if ($match.Count -ne 1) { throw "Expected one $part runtime DLL, found $($match.Count)" }
+          }
+      - name: Set MSVC compiler and linker environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+      - name: Generate version-matched FFmpeg import libraries from the 0.83 DLL exports
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path lav/bin_x64/lib -Force | Out-Null
+          foreach ($part in @("avformat", "avcodec", "avutil")) {
+            $dll = @(Get-ChildItem lav083-x64 -Recurse -Filter "*$part*-lav*.dll" -File)[0]
+            $lines = & dumpbin.exe /exports $dll.FullName
+            $symbols = foreach ($line in $lines) {
+              if ($line -match '^\s*\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+([A-Za-z_][A-Za-z_0-9@?$]*)') { $Matches[1] }
+            }
+            $symbols = @($symbols | Select-Object -Unique)
+            if ($symbols.Count -lt 25) { throw "Not enough exports for $part : $($symbols.Count)" }
+            $def = "lav/$part.def"
+            @("LIBRARY $($dll.Name)", "EXPORTS") + $symbols | Set-Content $def -Encoding ascii
+            & lib.exe "/def:$def" /machine:x64 "/out:lav/bin_x64/lib/$part-lav.lib"
+            if ($LASTEXITCODE -ne 0) { throw "Failed import library $part" }
+            Write-Host "$part import lib generated with $($symbols.Count) exports"
+          }
+      - name: MSVC Build Release x64 LAVSplitter.ax with unchanged 0.83 demux and FFmpeg
+        shell: pwsh
+        run: |
+          & msbuild.exe lav/demuxer/LAVSplitter/LAVSplitter.vcxproj /nologo /m:4 /t:Rebuild /p:Configuration=Release /p:Platform=x64 /p:SolutionDir="$((Get-Location).Path)\lav\" /v:minimal
+          if ($LASTEXITCODE -ne 0) { throw "LAVSplitter build failed" }
+          $built = @(Get-ChildItem lav/bin_x64 -Recurse -Filter LAVSplitter.ax -File)
+          if ($built.Count -eq 0) { throw "No LAVSplitter.ax" }
+          Write-Host "Built: $($built[0].FullName) $($built[0].Length) bytes"
+      - name: Package patched AX with original matching official runtime DLLs
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $filter = @(Get-ChildItem lav/bin_x64 -Recurse -Filter LAVSplitter.ax -File | Sort-Object FullName | Select-Object -First 1)[0]
+          Copy-Item $filter.FullName dist/LAVSplitter.ax
+          foreach ($part in @("avformat", "avcodec", "avutil")) {
+            $dll = @(Get-ChildItem lav083-x64 -Recurse -Filter "*$part*-lav*.dll" -File)[0]
+            Copy-Item $dll.FullName dist/
+          }
+          $readme = @'
+          EXPERIMENTAL LAV Splitter 0.83 x64: audio source delivery thread MMCSS
+          Source: Nevcairiel/LAVFilters tag 0.83
+          Changes: only demuxer/LAVSplitter/OutputPin.cpp
+          Audio output pin gets Windows 'Audio' MMCSS and restores it on exit.
+          Video output pin, decoder, FFmpeg and VapourSynth rendering threads not modified.
+          The included avformat/avcodec/avutil DLLs are the original matching
+          unmodified official LAVFilters 0.83 DLLs. No audio signal processing changes.
+          Close PotPlayer, back up old LAV Splitter and associated versions,
+          and use x64 matching files together; do not install mixed DLL versions.
+          Test with the original clean AX, clean MVUtensils, core.num_threads=32.
+          Observe WASAPI Exclusive glitches AND any change in video frame drops
+          or interp FPS; no performance claims until user validates throughput.
+          Uninstall: restore old LAVFilters binaries from backup.
+          '@
+          Set-Content dist/README-TEST.txt $readme -Encoding utf8
+          Get-ChildItem dist -File | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash)  $($_.Path | Split-Path -Leaf)" } | Set-Content dist/SHA256.txt
+          Compress-Archive -Path dist/* -DestinationPath LAVSplitter083-AudioMMCSS-Test-x64.zip -Force
+      - uses: actions/upload-artifact@v4
+        name: Upload isolated x64 test filter and matching official runtimes
+        with:
+          name: LAVSplitter083-AudioMMCSS-Exclusive-x64-Experiment
+          path: LAVSplitter083-AudioMMCSS-Test-x64.zip
+          retention-days: 30
+          if-no-files-found: error
