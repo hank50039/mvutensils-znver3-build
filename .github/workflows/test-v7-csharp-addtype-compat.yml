@@ -1,0 +1,93 @@
+name: Validate Windows PowerShell 5.1 CSharp module enumeration compatibility
+on:
+  push:
+    branches: [test/v7-module-audit-csharp-compat-20261023]
+  workflow_dispatch:
+jobs:
+  audit-compat:
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - name: Compile legacy-compatible CSharp Add-Type and enumerate real process
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Collections.Generic;
+          using System.Runtime.InteropServices;
+          public static class V7FixedModuleScan {
+              [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+              public struct MODULEENTRY32 {
+                  public uint dwSize;
+                  public uint th32ModuleID;
+                  public uint th32ProcessID;
+                  public uint GlblcntUsage;
+                  public uint ProccntUsage;
+                  public IntPtr modBaseAddr;
+                  public uint modBaseSize;
+                  public IntPtr hModule;
+                  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string szModule;
+                  [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExePath;
+              }
+              public sealed class ModuleRecord {
+                  public string Name { get; set; }
+                  public string Path { get; set; }
+                  public string Address { get; set; }
+              }
+              public sealed class ScanResult {
+                  public string Status { get; set; }
+                  public int LastError { get; set; }
+                  public List<ModuleRecord> Modules;
+                  public ScanResult() { Modules = new List<ModuleRecord>(); }
+              }
+              [DllImport("kernel32.dll", SetLastError = true)]
+              public static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+              [DllImport("kernel32.dll", EntryPoint = "Module32FirstW", SetLastError = true, CharSet = CharSet.Unicode)]
+              [return: MarshalAs(UnmanagedType.Bool)]
+              public static extern bool Module32First(IntPtr snap, ref MODULEENTRY32 m);
+              [DllImport("kernel32.dll", EntryPoint = "Module32NextW", SetLastError = true, CharSet = CharSet.Unicode)]
+              [return: MarshalAs(UnmanagedType.Bool)]
+              public static extern bool Module32Next(IntPtr snap, ref MODULEENTRY32 m);
+              [DllImport("kernel32.dll", SetLastError = true)]
+              [return: MarshalAs(UnmanagedType.Bool)]
+              public static extern bool CloseHandle(IntPtr handle);
+              public static ScanResult Scan(int pid) {
+                  var result = new ScanResult();
+                  IntPtr h = CreateToolhelp32Snapshot(0x18u, unchecked((uint)pid));
+                  if (h == new IntPtr(-1)) {
+                      result.Status = "SNAPSHOT_ERROR";
+                      result.LastError = Marshal.GetLastWin32Error();
+                      return result;
+                  }
+                  try {
+                      var m = new MODULEENTRY32();
+                      m.dwSize = (uint)Marshal.SizeOf(typeof(MODULEENTRY32));
+                      if (!Module32First(h, ref m)) {
+                          result.Status = "FIRST_ERROR";
+                          result.LastError = Marshal.GetLastWin32Error();
+                          return result;
+                      }
+                      do {
+                          result.Modules.Add(new ModuleRecord { Name = m.szModule ?? "", Path = m.szExePath ?? "", Address = m.modBaseAddr.ToString("X") });
+                          m.dwSize = (uint)Marshal.SizeOf(typeof(MODULEENTRY32));
+                      } while (Module32Next(h, ref m));
+                      result.LastError = Marshal.GetLastWin32Error();
+                      result.Status = result.LastError == 18 ? "OK" : "END_WITH_ERROR";
+                  } finally { CloseHandle(h); }
+                  return result;
+              }
+          }
+          '@ -ErrorAction Stop
+          Write-Host 'Add-Type succeeded with Windows PowerShell version' $PSVersionTable.PSVersion
+          $pidNow=[System.Diagnostics.Process]::GetCurrentProcess().Id
+          $scan=[V7FixedModuleScan]::Scan($pidNow)
+          Write-Host "Scan status $($scan.Status) native count $($scan.Modules.Count) Win32LastError $($scan.LastError)"
+          if ($scan.Status -ne 'OK' -or $scan.Modules.Count -lt 10) { throw "Native module enumeration failed or implausibly low for active PowerShell process" }
+          $native=@($scan.Modules | Where-Object { $_.Name -match '(?i)powershell|kernel32|ntdll' })
+          Write-Host "PowerShell/core native matches $($native.Count)"
+          if ($native.Count -lt 2) { throw 'Native module names were not collected correctly' }
+          $dotNet=@([Diagnostics.Process]::GetCurrentProcess().Modules)
+          Write-Host "DotNet module collection $($dotNet.Count)"
+          if ($dotNet.Count -lt 10) { throw 'DotNet native module count too low' }
+          Write-Host 'PASS: actual embedded CSharp body compiles on Windows PowerShell 5.1 and returns many distinct module rows.'
