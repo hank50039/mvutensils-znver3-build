@@ -1,7 +1,7 @@
 name: Verify built MPC Audio LIVE-V6 binary and COM constructor
 on:
   push:
-    branches: [experiment/mpc-audio-exclusive-pathdiag-v6-20261022]
+    branches: [experiment/mpc-audio-v6-com-validation-20261023]
   workflow_dispatch:
 permissions:
   contents: read
@@ -36,8 +36,8 @@ jobs:
           Write-Host "VERIFIED: compiled AX contains real LIVE-V6 diagnostic markers. Byte length=$($bin.Length)"
           $clsid = [guid]'601D2A2B-9CDE-40bd-8650-0485E3522727'
           try {
-            & "$env:WINDIR\System32\regsvr32.exe" /s $path
-            if ($LASTEXITCODE -ne 0) { throw "Regsvr32 returned $LASTEXITCODE" }
+            $r = Start-Process -FilePath "$env:WINDIR\System32\regsvr32.exe" -ArgumentList @('/s', ('"' + $path + '"')) -Wait -PassThru
+            if ($r.ExitCode -ne 0) { throw "Regsvr32 returned $($r.ExitCode)" }
             Write-Host 'Registered AX test instance on ephemeral CI Windows host.'
             $type = [type]::GetTypeFromCLSID($clsid)
             if (!$type) { throw 'GetTypeFromCLSID failed' }
@@ -59,5 +59,5 @@ jobs:
             }
             Write-Host 'PASS: compiled release AX can create constructor diagnostic log on a clean Windows host.'
           } finally {
-            & "$env:WINDIR\System32\regsvr32.exe" /s /u $path
+            Start-Process -FilePath "$env:WINDIR\System32\regsvr32.exe" -ArgumentList @('/s','/u', ('"' + $path + '"')) -Wait -PassThru | Out-Null
           }
