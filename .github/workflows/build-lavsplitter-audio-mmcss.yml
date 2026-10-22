@@ -71,14 +71,7 @@ jobs:
         run: |
           $header = 'lav/ffmpeg/libavutil/avconfig.h'
           if (!(Test-Path $header)) {
-            @"
-#ifndef AVUTIL_AVCONFIG_H
-#define AVUTIL_AVCONFIG_H
-#define AV_HAVE_BIGENDIAN 0
-#define AV_HAVE_FAST_UNALIGNED 1
-#define AV_HAVE_INCOMPATIBLE_LIBAV_ABI 0
-#endif
-"@ | Set-Content $header -Encoding ascii
+            @('#ifndef AVUTIL_AVCONFIG_H', '#define AVUTIL_AVCONFIG_H', '#define AV_HAVE_BIGENDIAN 0', '#define AV_HAVE_FAST_UNALIGNED 1', '#define AV_HAVE_INCOMPATIBLE_LIBAV_ABI 0', '#endif') | Set-Content $header -Encoding ascii
           }
           Get-Content $header
       - name: MSVC Build Release x64 LAVSplitter.ax with unchanged 0.83 demux and FFmpeg
