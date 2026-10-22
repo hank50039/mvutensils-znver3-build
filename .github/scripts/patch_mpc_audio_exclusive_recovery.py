@@ -20,41 +20,41 @@ def only(inp, old, new, label):
     return inp.replace(old, new, 1)
 
 h=only(h, 'class __declspec(uuid("601D2A2B-9CDE-40bd-8650-0485E3522727"))', 'class __declspec(uuid("601D2A2B-9CDE-40bd-8650-0485E3522727"))', "noop") if False else h
-h=only(h, '    CCritSec          m_csRender;', '''    // Accessed only under m_csRender (audio rendering thread or synchronized startup).
+h=only(h, '\tCCritSec          m_csRender;', '''\t// Accessed only under m_csRender (audio rendering thread or synchronized startup).
     // 32 video workers and Windows scheduler remain unrestricted.
     ULONGLONG         m_exclusiveEmptySinceMs = 0;
     ULONGLONG         m_exclusiveRecoveryCooldownMs = 0;
     unsigned          m_exclusiveBufferFailures = 0;
 
-    CCritSec          m_csRender;''', "audio-only watchdog state")
+\tCCritSec          m_csRender;''', "audio-only watchdog state")
 s=only(s,
-'''        if (FAILED(hr)) {
+'''\thr = m_pRenderClient->GetBuffer(numFramesAvailable, &pData);
+\tif (FAILED(hr)) {
 #if defined(DEBUG_OR_LOG) && DBGLOG_LEVEL > 1
-            DLog(L"CMpcAudioRenderer::RenderWasapiBuffer() - GetBuffer() failed with size %u (0x%08x)", numFramesAvailable, hr);
+\t\tDLog(L"CMpcAudioRenderer::RenderWasapiBuffer() - GetBuffer() failed with size %u (0x%08x)", numFramesAvailable, hr);
 #endif
-            return hr;
-        }''',
-'''        if (FAILED(hr)) {
-            // A single miss can be transient. A persistent exclusive buffer
-            // failure is handled via existing synchronized reinit machinery.
-            if (m_DeviceModeCurrent == MODE_WASAPI_EXCLUSIVE
-                && m_bIsAudioClientStarted && m_filterState == State_Running) {
-                if (++m_exclusiveBufferFailures >= 4) {
-                    const ULONGLONG now = GetTickCount64();
-                    if (now >= m_exclusiveRecoveryCooldownMs) {
-                        m_exclusiveRecoveryCooldownMs = now + 5000;
-                        SetReinitializeAudioDevice(TRUE);
-                        OutputDebugStringW(L"MpcAudioRecovery: repeated exclusive GetBuffer failures; requesting audio-only reinit\\n");
-                    }
-                    m_exclusiveBufferFailures = 0;
+\t\treturn hr;
+\t}''',
+'''\thr = m_pRenderClient->GetBuffer(numFramesAvailable, &pData);
+\tif (FAILED(hr)) {
+        // Only request audio-side restart on sustained error sequences.
+        if (m_DeviceModeCurrent == MODE_WASAPI_EXCLUSIVE
+            && m_bIsAudioClientStarted && m_filterState == State_Running) {
+            if (++m_exclusiveBufferFailures >= 4) {
+                const ULONGLONG now = GetTickCount64();
+                if (now >= m_exclusiveRecoveryCooldownMs) {
+                    m_exclusiveRecoveryCooldownMs = now + 5000;
+                    SetReinitializeAudioDevice(TRUE);
+                    OutputDebugStringW(L"MpcAudioRecovery: repeated exclusive GetBuffer failures; requesting audio-only reinit\\n");
                 }
+                m_exclusiveBufferFailures = 0;
             }
+        }
 #if defined(DEBUG_OR_LOG) && DBGLOG_LEVEL > 1
-            DLog(L"CMpcAudioRenderer::RenderWasapiBuffer() - GetBuffer() failed with size %u (0x%08x)", numFramesAvailable, hr);
+\t\tDLog(L"CMpcAudioRenderer::RenderWasapiBuffer() - GetBuffer() failed with size %u (0x%08x)", numFramesAvailable, hr);
 #endif
-            return hr;
-        }''', "get buffer failures")
-# The original source uses tabs for indentation; above anchor handled below by a robust exact regex if unavailable.
+\t\treturn hr;
+\t}''', "exclusive GetBuffer failures")
 s=only(s,
 '''\tconst BOOL bFlushing = m_FlushEvent.Check();
 \tif (!pData || !nWasapiQueueSize || m_filterState != State_Running || bFlushing) {''',
