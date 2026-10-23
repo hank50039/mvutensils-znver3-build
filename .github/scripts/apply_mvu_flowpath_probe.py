@@ -95,7 +95,7 @@ code = replace_once(code,
     "FlowFPS snapshot")
 flow.write_text(src, encoding="utf-8", newline="\n")
 fps.write_text(code, encoding="utf-8", newline="\n")
-for needle in ("MvuFlowPathProbe::Count(1);", "MvuFlowPathProbe::Count(3);",
+for needle in ("Count(width < 8 ? 11 : 1);", "MvuFlowPathProbe::Count(3);",
                "MvuFlowPathProbe::LogConfig(", "MvuFlowPathProbe::LogSnapshot("):
     if needle not in src + code:
         raise SystemExit(f"Probe anchor missing after patch: {needle}")
