@@ -61,7 +61,7 @@ int main() {
             }
             checksum+=(unsigned)_mm256_extract_epi32(b,0);
         }
-        std::printf("PASS pel=%d %d gathers, %d lanes\n",pel,N,N*8);
+        std::printf("PASS pel=%d %d gathers, %d lanes, checksum=%llu\n",pel,N,N*8,(unsigned long long)checksum);
     }
     // Four distinct scattered reads (F,FF,B,BB), like FlowInterExtra's hot loop.
     constexpr int W=3840,H=2160,STR=W+64,CHUNKS=100000;
@@ -87,7 +87,9 @@ int main() {
     for(int mode=0;mode<2;mode++) {
         double ms[5]{};
         for(int round=0;round<5;round++) {
-            uint64_t sink=0;
+            // Consume every lane: extracting lane 0 alone lets LLVM prune or
+            // scalarize almost all AVX2 gathers, corrupting the timing.
+            __m256i vector_sink=_mm256_setzero_si256();
             auto start=std::chrono::steady_clock::now();
             for(int k=0;k<CHUNKS;k++) {
                 __m256i samples[4];
@@ -98,10 +100,14 @@ int main() {
                 }
                 auto mixed=_mm256_add_epi32(_mm256_min_epi32(samples[0],samples[1]),
                                              _mm256_max_epi32(samples[2],samples[3]));
-                sink+=(unsigned)_mm256_extract_epi32(mixed,0);
+                vector_sink=_mm256_add_epi32(vector_sink,mixed);
             }
             ms[round]=std::chrono::duration<double,std::milli>(
                 std::chrono::steady_clock::now()-start).count();
+            alignas(32) uint32_t lanes[8];
+            _mm256_store_si256(reinterpret_cast<__m256i*>(lanes),vector_sink);
+            uint64_t sink=0;
+            for (uint32_t lane:lanes) sink+=lane;
             if(round==4)results[mode]=sink;
         }
         std::sort(ms,ms+5);med[mode]=ms[2];
