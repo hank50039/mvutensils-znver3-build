@@ -1,0 +1,131 @@
+name: Stage2 AVX2 u16 pel1 A-B and bit-exact kernel check
+on:
+  push:
+    branches: [experiment/mvu-u16-pel1-address-fastpath-20261024]
+    paths:
+      - '.github/workflows/build-u16-pel1-ab.yml'
+      - '.github/scripts/patch_u16_pel1_gather.py'
+      - '.github/scripts/test_u16_pel1_gather.cpp'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-ab:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up Windows Clang64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            git
+            mingw-w64-clang-x86_64-fftw
+            mingw-w64-clang-x86_64-git
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-python
+            mingw-w64-clang-x86_64-python-pip
+            mingw-w64-clang-x86_64-python-wheel
+            mingw-w64-clang-x86_64-toolchain
+            mingw-w64-clang-x86_64-uv
+            mingw-w64-clang-x86_64-zimg
+      - name: Compile and run 16-bit pixel-equivalence regression
+        run: |
+          mkdir -p dist
+          clang++ -std=c++20 -mavx2 -O3 -Wall -Wextra .github/scripts/test_u16_pel1_gather.cpp -o dist/compare_gather.exe
+          ./dist/compare_gather.exe | tee dist/equivalence_and_microbench.txt
+      - name: Prepare byte-identical source trees and modify only u16 AVX2 addressing
+        run: |
+          git clone https://github.com/myrsloik/mvutensils.git upstream-base
+          cd upstream-base
+          git checkout 4360d2ccfe3dc943c532e9ea7cd39c51dc0fd315
+          cd ..
+          cp -a upstream-base upstream-opt
+          python .github/scripts/patch_u16_pel1_gather.py upstream-opt
+          python - <<'PY'
+          from pathlib import Path
+          import difflib
+          a=Path("upstream-base/src/FlowShared_AVX2.cpp").read_text()
+          b=Path("upstream-opt/src/FlowShared_AVX2.cpp").read_text()
+          diffs=list(difflib.unified_diff(a.splitlines(), b.splitlines(), lineterm=''))
+          assert len(diffs) < 36, f"Too many changed lines: {len(diffs)}"
+          assert "if (p.nPel == 1)" in b and "if (p.nPel == 1)" not in a
+          assert "FlowInterExtra_scalar" in b and "FlowInterExtra_avx2_u16" in b
+          for key in ("src/Analyse.cpp", "src/Super.cpp", "src/FlowFPS.cpp",
+                      "src/FlowShared.h", "src/FlowShared_AVX512.cpp"):
+              assert Path("upstream-base",key).read_bytes()==Path("upstream-opt",key).read_bytes(), key
+          Path("dist/source_diff.txt").write_text("\n".join(diffs)+"\n",encoding="utf-8")
+          print("PASS: only mc_gather<2> pel1 branch changed; all other core sources identical")
+          PY
+      - name: Build exact same pinned source and compiler flags for both variants
+        run: |
+          set -e
+          for variant in base opt; do
+            (
+              cd "upstream-$variant"
+              python - <<'PY'
+          from pathlib import Path
+          p=Path("meson.build")
+          s=p.read_text(encoding="utf-8")
+          old="'1': ['-march=x86-64-v3'],"
+          new="'1': ['-march=x86-64-v3', '-mtune=znver3'],"
+          if s.count(old)!=1: raise SystemExit("Build flag unexpected; abort")
+          p.write_text(s.replace(old,new),encoding="utf-8")
+          PY
+              uv build -Csetup-args="-Dprefer_static=true" -Csetup-args="-Dcpp_link_args=-static"
+            )
+          done
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile,hashlib
+          for variant in ("base","opt"):
+              wheels=list(Path(f"upstream-{variant}/dist").glob("*.whl"))
+              assert len(wheels)==1,(variant,wheels)
+              with zipfile.ZipFile(wheels[0]) as a:
+                  matches=[x for x in a.namelist() if x.endswith("/mvutensils.avx2.dll")]
+                  assert len(matches)==1,(variant,matches)
+                  data=a.read(matches[0])
+              assert data[:2]==b"MZ"
+              out=Path(f"dist/mvutensils.avx2.{variant}.dll")
+              out.write_bytes(data)
+              print(out, len(data),hashlib.sha256(data).hexdigest())
+          assert Path("dist/mvutensils.avx2.base.dll").read_bytes()!=Path("dist/mvutensils.avx2.opt.dll").read_bytes()
+          PY
+          llvm-objdump -d dist/mvutensils.avx2.opt.dll | grep -m1 -i 'vpgatherdd' || { echo 'AVX2 gather opcode not found'; exit 1; }
+      - name: Prepare controlled comparison release package
+        run: |
+          cat > dist/README.txt <<'TXT'
+          MVUtensils Zen3 Stage 2: 16-bit PEL=1 Gather Address Fastpath A/B
+          ==============================================================
+          Baseline and candidate are both built from pinned upstream commit
+          4360d2ccfe3dc943c532e9ea7cd39c51dc0fd315 with the same
+          -march=x86-64-v3 -mtune=znver3 flags.
+          ONLY src/FlowShared_AVX2.cpp mc_gather<2> for pel=1 was changed.
+          No 8-bit kernel, YUV pixel logic, frame rate, or interpolation formula changed.
+          The 16-bit gather still reads four 32-bit lanes for each motion sample,
+          masking each lane with 0xFFFF exactly as before.
+          
+          Naming: mvutensils.avx2.base.dll = original clean control;
+                  mvutensils.avx2.opt.dll = experimental candidate.
+          Rename the DLL to mvutensils.avx2.dll *only when testing*.
+          Back up and restore your current DLL. Do not deploy both simultaneously.
+          All tests preserve 4K/10bit/90fps/CAP28/Fast Paths.
+          
+          Synthetic 4K 16-bit gather-equivalence test results are in
+          equivalence_and_microbench.txt. Timings were measured on GitHub's
+          runner, not on a Ryzen 5900XT; judge full 4K60-to-90fps FPS and
+          FlowFPS frame timings on the target PC before adoption.
+          TXT
+          sha256sum dist/mvutensils.avx2.*.dll > dist/DLL_SHA256.txt
+          rm dist/compare_gather.exe
+      - name: Upload both checked Windows 64-bit DLLs
+        uses: actions/upload-artifact@v7
+        with:
+          name: mvutensils-stage2-u16-pel1-ab-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
