@@ -100,6 +100,11 @@ int main() {
                 }
                 auto mixed=_mm256_add_epi32(_mm256_min_epi32(samples[0],samples[1]),
                                              _mm256_max_epi32(samples[2],samples[3]));
+                // Force every vector to remain observable at every iteration.
+                // Without this compiler barrier, Clang can fold most of the
+                // native-gather benchmark away (impossible ~0.03ms for 400k gathers).
+                // Both modes pay the same barrier cost.
+                __asm__ __volatile__("" : : "x"(mixed) : "memory");
                 vector_sink=_mm256_add_epi32(vector_sink,mixed);
             }
             ms[round]=std::chrono::duration<double,std::milli>(
