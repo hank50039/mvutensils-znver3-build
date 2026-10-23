@@ -1,8 +1,8 @@
-name: Build verified fully clean VapourSynth x64 - A/V sync BT709 CAP28 EOF
+name: Build safe-general metadata VapourSynth x64 - dual fastpath CAP28 EOF
 
 on:
   push:
-    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021, release/bt709-dual-fastpath-cap28-no-logs-20261021, experiment/eof-cap28-drain-20261021, experiment/eof-drain-eos-complete-20261021, experiment/eof-source-bound-shorttail-20261021, experiment/eof-stall-watchdiag-20261021, experiment/eof-dependency-trace-20261021, experiment/eof-duration-deadlock-fix-dlogs-20261021, release/eof-durationfix-dualfastpath-cap28-nolog-20261022, experiment/vsfilter-preserve-decoder-frames-no-dshow-quality-skip-20261022, release/vsfilter-fully-clean-avsync-cap28-eof-20261022]
+    branches: [build-potplayer-cap28-formatdiag, experiment/cap28-startpoint-diag-20261021, experiment/startpoint-scheduler-correlation-20261021, experiment/startpoint-burst-txt-20261021, experiment/bt709-precheck-fastpath-20261021, release/bt709-dual-fastpath-cap28-no-logs-20261021, experiment/eof-cap28-drain-20261021, experiment/eof-drain-eos-complete-20261021, experiment/eof-source-bound-shorttail-20261021, experiment/eof-stall-watchdiag-20261021, experiment/eof-dependency-trace-20261021, experiment/eof-duration-deadlock-fix-dlogs-20261021, release/eof-durationfix-dualfastpath-cap28-nolog-20261022, experiment/vsfilter-preserve-decoder-frames-no-dshow-quality-skip-20261022, release/vsfilter-fully-clean-avsync-cap28-eof-20261022, experiment/vsfilter-safe-general-metadata-20261023]
   workflow_dispatch:
 
 permissions:
@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Apply verified clean A/V source continuity + EOF + CAP28 patch
+      - name: Apply safe-general dual fastpath + fully clean A/V, EOF and CAP28 patch
         shell: pwsh
         run: |
           python .github/scripts/patch_vsfilter_diag.py avisynth_filter *> apply-patch.log
@@ -56,10 +56,14 @@ jobs:
           $frame = Get-Content avisynth_filter/vapoursynth_filter/src/frame_handler.cpp -Raw
           $envSource = Get-Content avisynth_filter/filter_common/src/environment.cpp -Raw
           $header = Get-Content avisynth_filter/vapoursynth_filter/src/frame_handler.h -Raw
-          if ($src -notmatch 'IsOnlyVideoInfo2ControlFlagsChanged' -or $src -notmatch '_isInputMediaTypeChanged = !metadataOnlyBt709') {
+          $policy = Get-Content avisynth_filter/filter_common/src/safe_video_info2_flags.h -Raw
+          if ($policy -notmatch 'CanBypassReconfigure' -or $policy -notmatch 'static_assert' -or $src -notmatch 'SafeVideoInfo2Flags::CanBypassReconfigure') {
+            throw "Color-safe flag policy or compile-time regression checks are missing."
+          }
+          if ($src -notmatch 'IsSafeVideoInfo2MetadataOnlyChange' -or $src -notmatch '_isInputMediaTypeChanged = !safeMetadataOnly') {
             throw "Tested Receive metadata-only Fast Path has been lost."
           }
-          if ($src -notmatch 'IsOnlyVideoInfo2ControlFlagsChanged\(m_pInput->CurrentMediaType\(\), \*mtIn\)') {
+          if ($src -notmatch 'IsSafeVideoInfo2MetadataOnlyChange\(m_pInput->CurrentMediaType\(\), \*mtIn\)') {
             throw "Tested Precheck metadata-only Fast Path has been lost."
           }
           if ($src -notmatch '#ifndef AVSF_VAPOURSYNTH\s+if \(ShouldSkipFrame\(pSample\)\)') {
@@ -131,7 +135,7 @@ jobs:
             "Source repository: CrendKing/avisynth_filter"
             "Pinned source commit: a07ccda967261832233185f1e1d9979ba12593c0"
             "Configuration: Release x64"
-            "Kept: BT.709 Receive and CheckInputType Precheck Fast Paths (metadata-only)"
+            "Kept: proven BT.709 Receive and CheckInputType Precheck Fast Paths; generalized conservative VIDEOINFOHEADER2 policy with full fallback"
             "Kept: CAP28 source-driven output refill and original asynchronous delivery order"
             "Kept: VapourSynth input continuity - no inherited quality frame skipping"
             "Kept: EOF deferred downstream notification and final frame watermark"
@@ -140,7 +144,7 @@ jobs:
             "Clean: removed all EOFWatch/StartSeek diagnostic probes, no-op logger, timed watchdog waits"
             "Clean: original condition_variable predicate waits restored; no runtime diagnostic output file opened"
             "Clean: built-in Environment logfile creation disabled regardless of configured LogFile"
-            "Untouched: interpolation script, pixel-format/color-space processing, source PTS and renderer"
+            "Untouched: interpolation script, pixel-format/color-space processing, source PTS and renderer; unsafe colorimetry/format transitions take normal path"
             "Runtime note: verify playback and WASAPI independent of this instrumentation cleanup"
           ) | Set-Content dist/BUILD-INFO.txt
           Get-FileHash (Join-Path dist $dll.Name) -Algorithm SHA256 | Format-List | Out-String | Set-Content dist/SHA256.txt
@@ -148,7 +152,7 @@ jobs:
       - name: Upload compiled filter
         uses: actions/upload-artifact@v4
         with:
-          name: potplayer-vsfilter-fully-clean-dualfastpath-cap28-avsync-eof-release-x64
+          name: potplayer-vsfilter-safe-general-metadata-dualfastpath-cap28-eof-x64
           path: dist/*
           if-no-files-found: error
           retention-days: 30
