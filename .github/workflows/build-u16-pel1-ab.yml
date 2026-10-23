@@ -95,7 +95,7 @@ jobs:
               print(out, len(data),hashlib.sha256(data).hexdigest())
           assert Path("dist/mvutensils.avx2.base.dll").read_bytes()!=Path("dist/mvutensils.avx2.opt.dll").read_bytes()
           PY
-          llvm-objdump -d dist/mvutensils.avx2.opt.dll | grep -m1 -i 'vpgatherdd' || { echo 'AVX2 gather opcode not found'; exit 1; }
+          llvm-objdump -d dist/mvutensils.avx2.opt.dll | grep -i 'vpgatherdd' | tail -n 1 || { echo 'AVX2 gather opcode not found'; exit 1; }
       - name: Prepare controlled comparison release package
         run: |
           cat > dist/README.txt <<'TXT'
