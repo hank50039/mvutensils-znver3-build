@@ -51,7 +51,7 @@ jobs:
           from pathlib import Path
           a = Path("upstream/src/FlowShared.h").read_text()
           b = Path("upstream/src/FlowFPS.cpp").read_text()
-          assert a.count("MvuFlowPathProbe::Count(") == 9, "Count call mismatch"
+          assert a.count("MvuFlowPathProbe::Count(") == 10, "Count call mismatch"
           assert b.count("MvuFlowPathProbe::LogSnapshot(") == 1, "Snapshot missing"
           assert b.count("MvuFlowPathProbe::LogConfig(") == 1, "Configuration log missing"
           assert "FlowInterExtra_avx2_u16(" in a and "FlowInterExtra_scalar<PixelType>" in a
