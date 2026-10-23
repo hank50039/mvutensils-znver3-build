@@ -18,18 +18,24 @@ def replace_once(path: Path, old: str, new: str, label: str) -> None:
         raise SystemExit(f"{label}: expected exactly one anchor, found {hits}; refusing to patch")
     path.write_text(source.replace(old, new, 1), encoding="utf-8", newline="")
 
-# Production patch: preserve BOTH previously tested BT.709 fast paths.
-# Use byte-exact guard; neither real colorspace transitions nor dimensions
-# nor image pixel layout changes are bypassed.
+# Preserve the observed BT.709 optimization and extend only proven-safe
+# VIDEOINFOHEADER2 flag transitions; unsafe/unknown formats take the original
+# DirectShow negotiation path instead of silently dropping HDR/color updates.
+policy_header = Path(__file__).resolve().parent / "safe_video_info2_flags.h"
+if not policy_header.is_file():
+    raise SystemExit("Missing safe metadata flag policy; refusing to patch")
+(root / "filter_common/src/safe_video_info2_flags.h").write_text(
+    policy_header.read_text(encoding="utf-8"), encoding="utf-8", newline="")
+
 s = filter_cpp.read_text(encoding="utf-8-sig")
 include_anchor = '#include "filter.h"\n\n#include "constants.h"'
 if s.count(include_anchor) != 1:
     raise SystemExit("filter.cpp includes have changed; refusing to patch")
-s = s.replace(include_anchor, '#include "filter.h"\n\n#include <cstddef>\n#include <cstring>\n#include <dvdmedia.h>\n\n#include "constants.h"', 1)
+s = s.replace(include_anchor, '#include "filter.h"\n\n#include <cstddef>\n#include <cstring>\n#include <dvdmedia.h>\n#include "safe_video_info2_flags.h"\n\n#include "constants.h"', 1)
 namespace_anchor = "namespace SynthFilter {\n\n"
 if s.count(namespace_anchor) != 1:
     raise SystemExit("filter.cpp namespace anchor changed; refusing to patch")
-helper = r'''auto IsOnlyVideoInfo2ControlFlagsChanged(const CMediaType &oldMediaType, const AM_MEDIA_TYPE &newMediaType) -> bool {
+helper = r'''auto IsSafeVideoInfo2MetadataOnlyChange(const CMediaType &oldMediaType, const AM_MEDIA_TYPE &newMediaType) -> bool {
     if (!IsEqualGUID(oldMediaType.majortype, newMediaType.majortype) ||
         !IsEqualGUID(oldMediaType.subtype, newMediaType.subtype) ||
         oldMediaType.bFixedSizeSamples != newMediaType.bFixedSizeSamples ||
@@ -51,21 +57,19 @@ helper = r'''auto IsOnlyVideoInfo2ControlFlagsChanged(const CMediaType &oldMedia
         return false;
     }
 
+    // Other layout fields must be identical. An actual BT.2020, HDR, range,
+    // aspect ratio or transfer-function change MUST negotiate normally.
     const auto &oldHeader = *reinterpret_cast<const VIDEOINFOHEADER2 *>(oldMediaType.pbFormat);
     const auto &newHeader = *reinterpret_cast<const VIDEOINFOHEADER2 *>(newMediaType.pbFormat);
-
-    // Exact, observed SDR metadata transition: previously unspecified to
-    // 4:2:0 / limited-range / BT.709 matrix, primaries and transfer function.
-    // The exact-value guard intentionally prevents swallowing other color-space
-    // changes (for example BT.2020/PQ or HLG).
-    return oldHeader.dwControlFlags == 0 &&
-           newHeader.dwControlFlags == 0x2880A581;
+    static_assert(AMCONTROL_USED == SafeVideoInfo2Flags::kAmcontrolUsed,
+                  "Unexpected AMCONTROL_USED value");
+    return SafeVideoInfo2Flags::CanBypassReconfigure(oldHeader.dwControlFlags, newHeader.dwControlFlags);
 }'''
 s = s.replace(namespace_anchor, namespace_anchor + "namespace {\n" + helper + "\n}\n\n", 1)
 filter_cpp.write_text(s, encoding="utf-8", newline="")
 
 # Precheck Fast Path: avoid redundant auxiliary VapourSynth script reloads
-# for the exact metadata-only input media type transition.
+# for safe metadata-only input media type transitions.
 replace_once(
     filter_cpp,
     '''auto CSynthFilter::CheckInputType(const CMediaType *mtIn) -> HRESULT {
@@ -73,7 +77,7 @@ replace_once(
     '''auto CSynthFilter::CheckInputType(const CMediaType *mtIn) -> HRESULT {
     if (mtIn != nullptr && IsActive() && m_pInput->IsConnected() &&
         !_isInputMediaTypeChanged && !_needReloadScript &&
-        IsOnlyVideoInfo2ControlFlagsChanged(m_pInput->CurrentMediaType(), *mtIn)) {
+        IsSafeVideoInfo2MetadataOnlyChange(m_pInput->CurrentMediaType(), *mtIn)) {
         return S_OK;
     }
     bool result = false;''',
@@ -91,9 +95,9 @@ replace_once(
     '''    AM_MEDIA_TYPE *pmt;
     pSample->GetMediaType(&pmt);
     if (pmt != nullptr && pmt->pbFormat != nullptr) {
-        const bool metadataOnlyBt709 =
+        const bool safeMetadataOnly =
             !_isInputMediaTypeChanged && !_needReloadScript &&
-            IsOnlyVideoInfo2ControlFlagsChanged(m_pInput->CurrentMediaType(), *pmt);
+            IsSafeVideoInfo2MetadataOnlyChange(m_pInput->CurrentMediaType(), *pmt);
         m_pInput->CurrentMediaType() = *pmt;''',
     "Receive exact metadata-only guard"
 )
@@ -104,7 +108,7 @@ replace_once(
         _isInputMediaTypeChanged = true;''',
     '''        _inputVideoFormat = Format::GetVideoFormat(*pmt, &MainFrameServer::GetInstance());
         DeleteMediaType(pmt);
-        _isInputMediaTypeChanged = !metadataOnlyBt709;''',
+        _isInputMediaTypeChanged = !safeMetadataOnly;''',
     "Receive skip-only-reconfigure path"
 )
 
@@ -502,8 +506,8 @@ modified = {
     "frame": frame_cpp.read_text(encoding="utf-8"),
     "environment": environment_cpp.read_text(encoding="utf-8"),
 }
-assert modified["filter"].count("IsOnlyVideoInfo2ControlFlagsChanged(") == 3
-assert "_isInputMediaTypeChanged = !metadataOnlyBt709" in modified["filter"]
+assert modified["filter"].count("IsSafeVideoInfo2MetadataOnlyChange(") == 3
+assert "_isInputMediaTypeChanged = !safeMetadataOnly" in modified["filter"]
 assert "#ifndef AVSF_VAPOURSYNTH\n    if (ShouldSkipFrame(pSample))" in modified["filter"]
 assert "MAX_PENDING_OUTPUT_FRAMES = 28" in modified["frame"]
 assert modified["frame"].count("getFrameAsync(") == 1
