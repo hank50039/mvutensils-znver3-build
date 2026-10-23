@@ -56,7 +56,7 @@ inline void LogConfig(int bits, int w, int h, unsigned cpuFlags) noexcept {
     char line[224] {};
     std::snprintf(line, sizeof(line),
         "stage=FlowFPSConfig bits=%d width=%d height=%d cpu_flags=0x%08X avx2_detected=%d\r\n",
-        bits, w, h, cpuFlags, (cpuFlags & (1u << 1)) ? 1 : -1);
+        bits, w, h, cpuFlags, (cpuFlags & (1u << 0)) ? 1 : 0);
     // avx2_detected is only informational; route counters are authoritative.
     WriteLine(line);
 }
